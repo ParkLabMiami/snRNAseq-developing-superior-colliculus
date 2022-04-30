@@ -22,4 +22,5 @@ results/*
 # Specific scripts
 scripts/*_detection.R
 scripts/*.pdf
+scripts/*.html
 
