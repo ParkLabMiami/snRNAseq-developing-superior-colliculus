@@ -1,0 +1,1001 @@
+---
+title: "Differential expression across development"
+author: "James Choi"
+date: "Last compiled: `r Sys.Date()`"
+output: 
+  html_document:
+    keep_md: true
+editor_options:
+  chunk_output_type: 
+    console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE, fig.align='center', 
+                      tidy.opts=list(width.cutoff=80), tidy=TRUE,
+                      results='hold')
+knitr::opts_knit$set(root.dir = 'D:/MiamiProject/Park_snSeq_SuperiorColliculus/')
+```
+
+
+## Setup
+
+```{r libraries}
+library(ggplot2)
+library(dplyr)
+library(scran)
+library(scuttle)
+library(DESeq2)
+library(DropletUtils)
+library(Seurat)
+library(patchwork)
+library(topGO)
+library(org.Mm.eg.db)
+```
+
+```{r utils}
+umap_theme <- theme_bw() + 
+  theme(panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank())
+shuffle_rows <- function(df) {
+  return(df[sample(x = 1:nrow(df), size = nrow(df)),])
+}
+```
+
+```{r samplesheet}
+samplesheet <- read.csv(file = 'data/samplesheet.csv')
+sample_names <- samplesheet$SampleName
+```
+
+```{r directories}
+results_out <- 'results/Differential-expression/'
+ambientResults_out <- 'results/Differential-expression/AmbientResults/'
+goResults_out <- 'results/Differential-expression/GO-analysis/'
+dir.create(path = results_out)
+dir.create(path = ambientResults_out)
+dir.create(path = goResults_out)
+```
+
+```{r}
+sc <- readRDS(file = 'data/sc.rds')
+neuron <- readRDS(file = 'data/neuron.rds')
+```
+
+```{r}
+Idents(sc) <- 'celltype'
+Idents(neuron) <- 'subtype'
+DimPlot(sc, label = TRUE, label.size = 4) + umap_theme + NoLegend() |
+  DimPlot(neuron, label = TRUE, label.size = 4) + umap_theme + NoLegend()
+```
+
+
+## Compute neuron DEG across time
+
+We compare neurons by major class i.e. excitatory and inhibitory. For each class, we perform DE test using Seurat default Wilcox test (since n = 1 sample per time-point) in a pair-wise fashion between all possible combinations of time-points. We continue to use Seurat's default logfc.threshold of 0.25. 
+
+
+```{r compute-deg}
+Idents(neuron) <- 'celltype_adjusted'
+comparison.pairs <- t(combn(levels(neuron$Time), 2))
+ex.neuron.deg <- vector(mode = 'list', length = nrow(comparison.pairs))
+in.neuron.deg <- vector(mode = 'list', length = nrow(comparison.pairs))
+names(in.neuron.deg) <- names(ex.neuron.deg) <- apply(
+  X = comparison.pairs,
+  FUN = paste, 
+  MARGIN = 1, 
+  collapse = '_'
+) # omg my eyes... what have I done?
+for (i in 1:nrow(comparison.pairs)) {
+  ex.neuron.deg[[i]] <- FindMarkers(
+    object = neuron,
+    subset.ident = 'Excitatory.Neuron',
+    group.by = 'Time',
+    ident.1 = comparison.pairs[i, 1],
+    ident.2 = comparison.pairs[i, 2],
+    logfc.threshold = 0.25,
+    slot = 'data',
+    test.use = 'wilcox'
+  )
+  in.neuron.deg[[i]] <- FindMarkers(
+    object = neuron,
+    subset.ident = 'Inhibitory.Neuron',
+    group.by = 'Time',
+    ident.1 = comparison.pairs[i, 1],
+    ident.2 = comparison.pairs[i, 2],
+    logfc.threshold = 0.25,
+    slot = 'data',
+    test.use = 'wilcox'
+  )
+}
+```
+
+
+We also test the `DESeq2` wrapper for `glmGamPoi` for a negative-binomial + likelihood ratio test for differential expression. The goal was to determine whether the DE testing with count-based models, rather than the normalized count + Wilcox test approach, would yield a lower false positive/negative rate (verified by inspecting violin plots). Results from empirical work suggests that, with only a single sample in each group, FPR and FNR were actually higher - almost 1800 genes were called DEG with -log10(adjusted p-values) ranging from 238 to 11. The "knee" point in log10(p-value) vs gene rank was approximately p = 1e-50 or ~1000 DEG. This somewhat corresponds to the number of DEG called by the default Wilcox test in Seurat. Therefore, we fall back onto the default Wilcox test for DEG detection.
+
+```{r compute-deg-DESeq2-glmGamPoi, eval=FALSE}
+neuron.metadata <- neuron@meta.data[neuron$celltype_adjusted == 'Excitatory.Neuron',]
+neuron.metadata$group <- paste(neuron.metadata$celltype_adjusted, neuron.metadata$Time, sep = '_')
+neuron.metadata$detection.rate <- scale(neuron.metadata$nFeature_RNA)
+hist(neuron.metadata$detection.rate, breaks = 50, probability = TRUE)
+curve(dnorm(x, mean = 0, sd = 1), add = TRUE, col = 'red')
+
+dds <- DESeqDataSetFromMatrix(
+  countData = neuron[['RNA']]@counts[, neuron$celltype_adjusted == 'Excitatory.Neuron'],
+  colData = neuron.metadata,
+  design = ~ group + detection.rate
+)
+dds$group <- factor(
+  x = dds$group,
+  levels = c('Excitatory.Neuron_E19',
+             'Excitatory.Neuron_P4',
+             'Excitatory.Neuron_P8',
+             'Excitatory.Neuron_P21')
+)
+dds$group <- relevel(dds$group, ref = 'Excitatory.Neuron_E19')
+neuron.sizefactors <- scuttle::pooledSizeFactors(neuron_sce[,neuron$celltype_adjusted == 'Excitatory.Neuron'])
+sizeFactors(dds) <- neuron.sizefactors
+dds <- DESeq(dds, test = 'LRT', minmu = 1e-6, useT = TRUE, minReplicatesForReplace = Inf, fitType = 'glmGamPoi', reduced = ~ 1 + detection.rate)
+res.p4 <- results(dds, name = 'groupExcitatory.Neuron_P4')
+tmp <- res.p4 %>%
+  as.data.frame() %>% 
+  filter(!is.na(padj),
+         baseMean > 0.1,
+         abs(log2FoldChange) > 0.25) %>% 
+  arrange(padj)
+```
+
+
+## Accounting for ambient RNA contamination
+
+```{r}
+DimPlot(sc, group.by = 'celltype', label = TRUE) + umap_them + NoLegend()
+DimPlot(neuron, group.by = 'celltype_adjusted', label = TRUE, label.size = 4) + umap_theme + NoLegend()
+```
+
+```{r}
+head(ex.neuron.deg$E19_P4, 10)
+head(in.neuron.deg$E19_P4, 10)
+```
+
+DE test of ex neurons across time-points shows many genes that are not specific to ex neurons. Many of these genes are potentially due to ambient RNA contamination since their expression is detected in multiple cell-types e.g. Ttr. 
+
+```{r ambient-genes-examples}
+Idents(sc) <- 'Time'
+ambient.deg <- rownames(ex.neuron.deg$E19_P4)[1:5]
+p.ambient.deg <- vector(mode = 'list', length = length(ambient.deg))
+for (i in seq_along(ambient.deg)) {
+  p.ambient.deg[[i]] <- FetchData(sc, c('UMAP_1', 'UMAP_2', 'Time', ambient.deg[i])) %>% 
+    filter(Time %in% c('E19','P4')) %>% 
+    reshape2::melt(id.vars = c('UMAP_1', 'UMAP_2', 'Time')) %>% 
+    shuffle_rows() %>% 
+    # arrange(value) %>% 
+    ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+    geom_point(mapping = aes(color = value), size = 0.5) +
+    labs(title = ambient.deg[i]) +
+    facet_wrap(. ~ Time, ncol = 1) +
+    scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n = 8, 'RdBu'))) +
+    umap_theme +
+    theme(strip.text = element_text(size = 12),
+          plot.title = element_text(size = 14)) +
+    NoLegend()
+}
+p.ambient.deg <- cowplot::plot_grid(plotlist = p.ambient.deg, ncol = length(ambient.deg))
+ggsave(filename = paste0(results_out, 'ExNeuron_P4-vs-E19_ambient-deg.tiff'), plot = p.ambient.deg, device = 'tiff', height = 6, width = 14)
+p.ambient.deg
+```
+
+To remove DEGs called due to ambient contamination, we use functions in the `DropletUtils` BioConductor package. 
+
+Procedure:
+
+1. Compute ambient RNA profile using `DropletUtils::ambientProfileEmpty()`, which takes a simple sum across empty droplets for each gene.
+2. Aggregate count matrix by neuron subtype and sample (i.e. into groupings that reflect the comparison being made e.g. ExNeuron P4 vs E19).
+3. Estimate the maximum per-gene count contributed by ambient RNA using the `DropletUtils::ambientContriMaximum()` function, which does:
+  a. for some scale factor in a range of scale factors,
+  b. scale the ambient RNA vector by scale factor,
+  c. use poisson distribution with mean == variance == scaled ambient RNA count
+  d. for genes in observed count matrix solely comprised of ambient, poisson-expected count == observed count
+  e. for genes with cell contribution, poisson-expected count < (observed count == ambient RNA count + cell-derived count) 
+  f. for increasing scale factors (increasing poisson-expected counts), lower tailed null hypothesis that expected count <= observed rejected almost always and number of significant genes decreases.
+  g. for decreasing scale factors (decreasing poisson-expected counts), lower tailed null hypothesis that expected count <= observed rejected almost never and number of significant genes increases.
+  h. per-gene p-values are combined using Simes' multiple hypothesis correction for a global null hypothesis (rejected when any single gene is rejection). 
+  i. increase size factors until global null is not rejected.
+4. Result of `ambientContriMaximum()` is a gene-by-sample matrix of probabilities.
+
+
+Additional concepts:
+
+* Good-Turing estimation: technique to compute probability of observing previously unobserved class e.g. prob of observing black ball drawn from basket when previously observed red and green balls, using assumptions of binomial distributions. (Good-Turing not actually used for ambient removal because we dont need to estimate proportions - only counts scaled by size.factors).
+
+```{r load-raw-counts}
+Idents(sc) <- 'celltype'
+raw.counts <- vector(mode = 'list', length = length(samplesheet$raw_feature_bc_matrix_path))
+names(raw.counts) <- samplesheet$SampleName
+for (i in seq_along(samplesheet$raw_feature_bc_matrix_path)) {
+  raw.counts[[i]] <- Read10X_h5(filename = samplesheet$raw_feature_bc_matrix_path[i])
+}
+```
+
+To estimate the ambient profile, we set the `lower` parameter to 0.9 * log10(UMI inflection) based on the second knee points in the barcode-rank plots produced during the preprocessing/quality control. Everything below these values are presumed to contain empty droplets from which we can estimate an ambient RNA profile. It is unclear how varying this value affects estimate profile, but my guess would be that, within a certain range, it has little effect because a large majority of droplets (~ several thousand among ~700,000 ie >99%) are along the lower "plateau" in the barcode-rank plot and dilutes the counts from bona fide cells accidentally included from below the threshold.
+
+Barcode rank plots from preprocessing step indicates smaller range between average UMI count of non-empty droplets and UMI count of empty droplets for E19 sample compared to the range for P21 sample. 
+
+
+```{r estimate-ambient-profile}
+# inflection <- c(E19 = 2627, P4 = 2875, P8 = 2335, P21 = 1889)
+empty.threshold <- c()
+for (i in seq_along(raw.counts)) {
+  bcrank <- barcodeRanks(
+    m = raw.counts[[i]],
+    lower = 100,
+    fit.bounds = c(100, 1500)
+  )
+  empty.threshold[i] <- 10^(log10(bcrank@metadata$knee) * 1.05) 
+}
+
+# total.umi <- lapply(X = raw.counts, FUN = sparseMatrixStats::colSums2)
+# mapply(FUN = function(x, y) table(x < y), total.umi, empty.threshold)
+ambient <- vector(mode = 'list', length = length(raw.counts))
+names(ambient) <- samplesheet$SampleName
+for (i in seq_along(raw.counts)) {
+  ambient[[i]] <- ambientProfileEmpty(
+    m = raw.counts[[i]],
+    lower = empty.threshold[i],
+    good.turing = FALSE,
+    round = TRUE
+  )
+}
+ambient <- Reduce(f = cbind, x = ambient)
+colnames(ambient) <- samplesheet$SampleName
+```
+
+
+For each (cell-type, sample) combination, we sum counts for a pseudobulk expression profile from which to estimate ambient RNA contamination profile.
+
+```{r aggregate-pseudobulk}
+neuron_sce <- SingleCellExperiment(
+  assays = list(counts = neuron[['RNA']]@counts)
+)
+colData(neuron_sce) <- cbind(colData(neuron_sce), neuron@meta.data)
+neuron_summed <- aggregateAcrossCells(
+  x = neuron_sce,
+  ids = paste(neuron_sce$celltype_adjusted, neuron_sce$Time, sep = '_')
+)
+neuron_summed <- neuron_summed[, c('Excitatory.Neuron_E19', 'Excitatory.Neuron_P4', 'Excitatory.Neuron_P8', 'Excitatory.Neuron_P21', 'Inhibitory.Neuron_E19', 'Inhibitory.Neuron_P4', 'Inhibitory.Neuron_P8', 'Inhibitory.Neuron_P21')]
+neuron_summed$ids <- factor(
+  x = neuron_summed$ids,
+  levels = c('Excitatory.Neuron_E19',
+             'Excitatory.Neuron_P4',
+             'Excitatory.Neuron_P8',
+             'Excitatory.Neuron_P21',
+             'Inhibitory.Neuron_E19',
+             'Inhibitory.Neuron_P4',
+             'Inhibitory.Neuron_P8',
+             'Inhibitory.Neuron_P21')
+)
+```
+
+
+Compute maximum potential ambient count contribution using method described above, where possion-based count statistics are used to estimate likelihood of observing ambient counts <= actual observed counts. This is repeated for each cell-type.
+
+* `threshold` determines "false positive rate" of genes with ambient counts <= observed counts.
+
+```{r estimate-ambient-proportion}
+ex.neuron_summed <- neuron_summed[, neuron_summed$celltype_adjusted == 'Excitatory.Neuron']
+in.neuron_summed <- neuron_summed[, neuron_summed$celltype_adjusted == 'Inhibitory.Neuron']
+ex.max.ambient <- ambientContribMaximum(
+  y = counts(ex.neuron_summed),
+  ambient = ambient,
+  threshold = 0.1,
+  mode = 'proportion'
+)
+in.max.ambient <- ambientContribMaximum(
+  y = counts(in.neuron_summed),
+  ambient = ambient,
+  threshold = 0.1,
+  mode = 'proportion'
+)
+```
+
+
+Given the maximum estimated contamination proportions for each gene, remove those from the DEG list which have a proportion greater than 10% in either of the two samples being compared.
+
+```{r filter-ambient-contamination}
+ex.neuron.deg.filtered <- in.neuron.deg.filtered <- vector(mode = 'list', length = length(in.neuron.deg))
+names(ex.neuron.deg.filtered) <- names(in.neuron.deg.filtered) <- names(ex.neuron.deg)
+ex.ambient.summary <- in.ambient.summary <- vector(mode = 'list', length = length(ex.neuron.deg))
+names(ex.ambient.summary) <- names(in.ambient.summary) <- names(ex.neuron.deg)
+for (i in seq_along(ex.neuron.deg)) {
+  ambient.cols <- grep(
+    pattern = paste(comparison.pairs[i,], collapse = '|'),
+    x = colnames(ex.max.ambient)
+  )
+  contamination <- apply(
+    X = ex.max.ambient[,ambient.cols],
+    MARGIN = 1,
+    FUN = function(x) any(x > 0.1, na.rm = TRUE)
+  )
+  non.ambient <- rownames(ex.max.ambient)[!contamination]
+  ex.neuron.deg.filtered[[i]] <- ex.neuron.deg[[i]] %>% 
+    tibble::rownames_to_column(var = 'gene') %>% 
+    filter(p_val_adj < 0.05,
+           gene %in% non.ambient)
+  ex.ambient.summary[[i]] <- table(
+    nonambient = rownames(ex.neuron.deg[[i]]) %in% non.ambient,
+    significant = ex.neuron.deg[[i]]$p_val_adj < 0.05
+  )
+}
+for (i in seq_along(in.neuron.deg)) {
+  ambient.cols <- grep(
+    pattern = paste(comparison.pairs[i,],collapse = '|'),
+    x = colnames(ex.max.ambient)
+  )
+  contamination <- apply(
+    X = ex.max.ambient[,ambient.cols],
+    MARGIN = 1,
+    FUN = function(x) any(x > 0.1, na.rm = TRUE)
+  )
+  non.ambient <- rownames(ex.max.ambient)[!contamination]
+  in.neuron.deg.filtered[[i]] <- in.neuron.deg[[i]] %>% 
+    tibble::rownames_to_column(var = 'gene') %>% 
+    filter(p_val_adj < 0.05,
+           gene %in% non.ambient)
+  in.ambient.summary[[i]] <- table(
+    nonambient = rownames(in.neuron.deg[[i]]) %in% non.ambient,
+    significant = in.neuron.deg[[i]]$p_val_adj < 0.05
+  )
+}
+```
+
+```{r save-results}
+# DEGs
+for (i in seq_along(ex.neuron.deg.filtered)) {
+  write.csv(x = ex.neuron.deg.filtered[[i]], file = paste0(results_out, names(ex.neuron.deg.filtered)[i], '_ExNeurons_DEG.csv'), quote = FALSE, row.names = FALSE)
+}
+for (i in seq_along(in.neuron.deg.filtered)) {
+  write.csv(x = in.neuron.deg.filtered[[i]], file = paste0(results_out, names(in.neuron.deg.filtered)[i], '_InNeurons_DEG.csv'), quote = FALSE, row.names = FALSE)
+}
+
+# Ambient removal
+for (i in seq_along(ex.ambient.summary)) {
+  write.csv(x = data.frame(ex.ambient.summary[[i]]), file = paste0(ambientResults_out, names(ex.ambient.summary)[i], '_ExNeurons_ambientGeneSummary.csv'), quote = FALSE, row.names = FALSE)
+}
+for (i in seq_along(in.ambient.summary)) {
+  write.csv(x = data.frame(in.ambient.summary[[i]]), file = paste0(ambientResults_out, names(in.ambient.summary)[i], '_InNeurons_ambientGeneSummary.csv'), quote = FALSE, row.names = FALSE)
+}
+```
+
+```{r load-deg-results}
+# Ex Neurons
+ex.neuron.deg.filtered <- list.files(
+  path = 'results/Differential-expression/',
+  pattern = 'ExNeurons_DEG.csv', 
+  full.names = TRUE
+)
+names(ex.neuron.deg.filtered) <- gsub(
+  pattern = '_ExNeurons_DEG.csv', 
+  replacement = '', 
+  x = sapply(
+    X = strsplit(x = ex.neuron.deg.filtered, split = '/'),
+    FUN = `[`,
+    3
+  )
+)
+ex.neuron.deg.filtered <- lapply(
+  X = ex.neuron.deg.filtered,
+  FUN = read.csv
+)
+# In Neurons
+in.neuron.deg.filtered <- list.files(
+  path = 'results/Differential-expression/',
+  pattern = 'InNeurons_DEG.csv', 
+  full.names = TRUE
+)
+names(in.neuron.deg.filtered) <- gsub(
+  pattern = '_InNeurons_DEG.csv', 
+  replacement = '', 
+  x = sapply(
+    X = strsplit(x = in.neuron.deg.filtered, split = '/'),
+    FUN = `[`,
+    3
+  )
+)
+in.neuron.deg.filtered <- lapply(
+  X = in.neuron.deg.filtered,
+  FUN = read.csv
+)
+```
+
+
+## Excitatory neuron gene expression over time
+
+```{r plot-inhibitory-deg-scatter}
+neuron$de <- paste(neuron$celltype_adjusted, neuron$Time, sep = '_')
+neuron$de <- factor(
+  x = neuron$de,
+  levels = c('Excitatory.Neuron_E19', 'Excitatory.Neuron_P4', 'Excitatory.Neuron_P8', 'Excitatory.Neuron_P21', 'Inhibitory.Neuron_E19', 'Inhibitory.Neuron_P4', 'Inhibitory.Neuron_P8', 'Inhibitory.Neuron_P21')
+)
+avg.exp <- AverageExpression(
+  neuron,
+  assays = 'RNA',
+  group.by = 'de', 
+  slot = 'counts'
+)[['RNA']]
+ex.avg.exp <- avg.exp[,grep('Excitatory.Neuron', colnames(avg.exp))]
+
+p.ex.deg <- vector(mode = 'list', length = length(ex.neuron.deg.filtered))
+names(p.ex.deg) <- names(ex.neuron.deg.filtered)
+for (i in seq_along(ex.neuron.deg.filtered)) {
+  take <- unlist(strsplit(names(ex.neuron.deg.filtered)[i], '_'))
+  take <- grep(paste(take, collapse = '|'), colnames(ex.avg.exp), value = TRUE)
+  p.ex.deg[[i]] <- ex.avg.exp[,take] %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = 'gene') %>%
+    merge(
+      y = ex.neuron.deg.filtered[[i]], 
+      by.x = 'gene', 
+      all.x = TRUE
+    ) %>% 
+    mutate(significant = ifelse(
+      test = p_val_adj < 0.05 & !is.na(p_val_adj),
+      yes = ifelse(
+        test = avg_log2FC > 0,
+        yes = 'x',
+        no = 'y'
+      ),
+      no = 'no'
+    )) %>%
+    arrange(avg_log2FC) %>% 
+    ggplot(mapping = aes_string(x = take[1], y = take[2])) +
+    geom_point(mapping = aes(color = significant, 
+                             alpha = significant, 
+                             size = significant)) +
+    scale_color_manual(values = c(x = 'blue', y = 'red', no = 'black')) +
+    scale_size_manual(values = c(x = 1, y = 1, no = 0.5)) +
+    scale_alpha_manual(values = c(x = 0.7, y = 0.7, no = 0.05)) +
+    scale_x_log10(limits = c(NA,360), breaks = 10^seq(-1,10)) +
+    scale_y_log10(limits = c(NA,360), breaks = 10^seq(-1,10)) +
+    theme_bw()
+}
+layout <- 'AA####
+BBCC##
+DDEEFF
+'
+p.grid <- p.ex.deg$E19_P4 + p.ex.deg$E19_P8 +  p.ex.deg$P4_P8 + p.ex.deg$E19_P21 + p.ex.deg$P4_P21 + p.ex.deg$P8_P21 + plot_layout(design = layout, guides = 'collect')
+ggsave(filename = paste0(results_out, 'ExNeuron_pairwise-deg.tiff'), plot = p.grid, device = 'tiff', height = 6, width = 8)
+```
+
+
+Volcano plots are ugly here. RIP.
+
+```{r}
+volcano.dat <- ex.neuron.deg.filtered
+for (i in seq_along(volcano.dat)) {
+  volcano.dat[[i]]$Comparison <- names(volcano.dat)[i]
+}
+volcano.dat <- Reduce(f = rbind, x = volcano.dat) %>%
+  filter(Comparison %in% c('E19_P4', 'P4_P8', 'P8_P21'))
+minpval <- min(volcano.dat$p_val_adj)
+volcano.dat$log_pval = ifelse(
+  test = is.infinite(volcano.dat$p_val_adj), 
+  yes = -log10(min_pval),
+  no = -log10(volcano.dat$p_val_adj)
+)
+show_label <- volcano.dat %>% 
+  group_by(Comparison) %>% 
+  top_n(n = 30, wt = -log10(p_val_adj)) %>% 
+  top_n(n = 10, wt = abs(avg_log2FC))
+volcano.dat %>% 
+  ggplot(mapping = aes(x = avg_log2FC, y = log_pval)) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  facet_wrap(. ~ Comparison) +
+  theme_bw()
+```
+
+Let's count DEGs instead. Note: DE tests were conducted such that the first group listed in the comparisons have greater expression than the second group if the avg_log2FC > 0. e.g. In E19_P4, a gene with avg_log2FC > 0 is more highly expressed in E19 neurons.
+
+```{r ex-neuron-deg-count}
+deg.long <- ex.neuron.deg.filtered
+for (i in seq_along(deg.long)) {
+  deg.long[[i]]$Comparison <- names(deg.long)[i]
+}
+deg.count <- Reduce(f = rbind, x = deg.long) %>%
+  filter(Comparison %in% c('E19_P4', 'P4_P8', 'P8_P21'),
+         p_val_adj < 0.05) %>% 
+  mutate(direction = ifelse(avg_log2FC > 0, 'Down-regulated', 'Up-regulated')) %>% 
+  group_by(Comparison, direction) %>% 
+  summarise(nDEG = n_distinct(gene)) %>% 
+  mutate(Comparison = gsub(pattern = '_', replacement = '\U2192', Comparison))
+p.ex.deg.count <- deg.count %>% 
+  mutate(nDEG = ifelse(direction == 'Down-regulated', -nDEG, nDEG)) %>% 
+  ggplot(mapping = aes(x = Comparison, y = nDEG)) +
+  geom_bar(mapping = aes(fill = direction), color = 'black', stat = 'identity') +
+  geom_hline(yintercept = 0, lwd = 0.5, color = 'black') +
+  labs(title = stringr::str_wrap('Excitatory neuron gene expression changes over time', width = 30)) +
+  ylab(label = 'Number of DEGs') +
+  scale_fill_manual(values = c('Up-regulated' = 'red', 'Down-regulated' = 'blue')) +
+  scale_y_continuous(breaks = seq(-1000, 1000, 100),
+                     labels = c(rev(seq(100, 1000, 100)), seq(0, 1000, 100))) +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 12, color = 'black'),
+        axis.text = element_text(size = 12, color = 'black'),
+        axis.title.y = element_text(size = 14, color = 'black'),
+        axis.title.x = element_blank(),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA))
+ggsave(filename = paste0(results_out, 'ExNeuron_DEGcount.tiff'), plot = p.ex.deg.count, device = 'tiff', height = 4, width = 5, dpi = 320)
+```
+
+And visualize DEG with a heatmap.
+
+```{r ex.gene.clusters}
+all.ex.genes <- sapply(
+  X = ex.neuron.deg.filtered,
+  FUN = `[[`, 'gene'
+)
+all.ex.genes <- Reduce(f = union, x = all.ex.genes)
+DefaultAssay(neuron) <- 'RNA'
+tmp <- FetchData(neuron, vars = c(all.ex.genes, 'Time', 'celltype_adjusted'), slot = 'data') %>% 
+  dplyr::rename(celltype = celltype_adjusted) %>% 
+  mutate(across(.cols = where(is.numeric), .fns = scale)) %>% 
+  group_by(celltype, Time) %>% 
+  summarise(across(.cols = everything(), .fns = mean)) %>% 
+  ungroup() %>% 
+  reshape2::melt(id.vars = c('celltype', 'Time')) %>% 
+  mutate(obs_id = paste(celltype, variable, sep = '_')) %>% 
+  dplyr::select(c('obs_id', 'Time', 'value')) %>% 
+  reshape2::acast(formula = obs_id ~ Time)
+tmp.dist <- dist(x = tmp)
+tmp.hclust <- hclust(d = tmp.dist, method = 'ward.D2')
+tmp.cluster <- cutree(tree = tmp.hclust, k = 10)
+p.ex.gene.clusters <- cbind(as.data.frame(tmp), 'cluster' = tmp.cluster) %>% 
+  tibble::rownames_to_column('obs') %>% 
+  reshape2::melt(id.vars = c('obs', 'cluster')) %>% 
+  mutate(cluster = factor(x = paste('Gene cluster:', cluster),
+                          levels = paste('Gene cluster:', 1:10))) %>% 
+  ggplot(mapping = aes(x = variable, y = value, group = obs, color = cluster)) +
+  geom_line(alpha = 0.3) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  # scale_color_viridis_d() +
+  facet_wrap(. ~ cluster, scales = 'free_y', ncol = 5) +
+  ylab(label = 'Scaled expression') +
+  theme_bw() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 10, color = 'black'),
+        axis.title.y = element_text(size = 14, color = 'black'),
+        axis.title.x = element_blank(),
+        strip.text = element_text(size = 14, color = 'black'))
+ggsave(filename = paste0(results_out, 'DEGclusters_ExNeuron.tiff'), plot = p.ex.gene.clusters, height = 5, width = 12)
+```
+
+
+## Inhibitory neuron gene expression over time
+
+```{r plot-inhibitory-deg-scatter}
+neuron$de <- paste(neuron$celltype_adjusted, neuron$Time, sep = '_')
+neuron$de <- factor(
+  x = neuron$de,
+  levels = c('Excitatory.Neuron_E19', 'Excitatory.Neuron_P4', 'Excitatory.Neuron_P8', 'Excitatory.Neuron_P21', 'Inhibitory.Neuron_E19', 'Inhibitory.Neuron_P4', 'Inhibitory.Neuron_P8', 'Inhibitory.Neuron_P21')
+)
+avg.exp <- AverageExpression(
+  neuron,
+  assays = 'RNA',
+  group.by = 'de', 
+  slot = 'counts'
+)[['RNA']]
+in.avg.exp <- avg.exp[,grep('Inhibitory.Neuron', colnames(avg.exp))]
+
+p.in.deg <- vector(mode = 'list', length = length(in.neuron.deg.filtered))
+names(p.in.deg) <- names(in.neuron.deg.filtered)
+for (i in seq_along(in.neuron.deg.filtered)) {
+  take <- unlist(strsplit(names(in.neuron.deg.filtered)[i], '_'))
+  take <- grep(paste(take, collapse = '|'), colnames(in.avg.exp), value = TRUE)
+  p.in.deg[[i]] <- in.avg.exp[,take] %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = 'gene') %>%
+    merge(
+      y = in.neuron.deg.filtered[[i]], 
+      by.x = 'gene', 
+      all.x = TRUE
+    ) %>% 
+    mutate(significant = ifelse(
+      test = p_val_adj < 0.05 & !is.na(p_val_adj),
+      yes = ifelse(
+        test = avg_log2FC > 0,
+        yes = 'x',
+        no = 'y'
+      ),
+      no = 'no'
+    )) %>%
+    arrange(avg_log2FC) %>% 
+    ggplot(mapping = aes_string(x = take[1], y = take[2])) +
+    geom_point(mapping = aes(color = significant, 
+                             alpha = significant, 
+                             size = significant)) +
+    scale_color_manual(values = c(x = 'blue', y = 'red', no = 'black')) +
+    scale_size_manual(values = c(x = 1, y = 1, no = 0.5)) +
+    scale_alpha_manual(values = c(x = 0.7, y = 0.7, no = 0.05)) +
+    scale_x_log10(limits = c(NA,360), breaks = 10^seq(-1,10)) +
+    scale_y_log10(limits = c(NA,360), breaks = 10^seq(-1,10)) +
+    theme_bw()
+}
+layout <- 'AA####
+BBCC##
+DDEEFF
+'
+p.grid <- p.in.deg$E19_P4 + p.in.deg$E19_P8 +  p.in.deg$P4_P8 + p.in.deg$E19_P21 + p.in.deg$P4_P21 + p.in.deg$P8_P21 + plot_layout(design = layout, guides = 'collect')
+ggsave(filename = paste0(results_out, 'InNeuron_pairwise-deg.tiff'), plot = p.grid, device = 'tiff', height = 6, width = 8)
+```
+
+```{r in-neuron-deg-count}
+deg.long <- in.neuron.deg.filtered
+for (i in seq_along(deg.long)) {
+  deg.long[[i]]$Comparison <- names(deg.long)[i]
+}
+deg.count <- Reduce(f = rbind, x = deg.long) %>%
+  filter(Comparison %in% c('E19_P4', 'P4_P8', 'P8_P21'),
+         p_val_adj < 0.05) %>% 
+  mutate(direction = ifelse(avg_log2FC > 0, 'Down-regulated', 'Up-regulated')) %>% 
+  group_by(Comparison, direction) %>% 
+  summarise(nDEG = n_distinct(gene)) %>% 
+  mutate(Comparison = gsub(pattern = '_', replacement = '\U2192', Comparison))
+p.in.deg.count <- deg.count %>% 
+  mutate(nDEG = ifelse(direction == 'Down-regulated', -nDEG, nDEG)) %>% 
+  ggplot(mapping = aes(x = Comparison, y = nDEG)) +
+  geom_bar(mapping = aes(fill = direction), color = 'black', stat = 'identity') +
+  geom_hline(yintercept = 0, lty = 'dashed', lwd = 1, color = 'black') +
+  labs(title = stringr::str_wrap('Inhibitory neuron gene expression changes over time', width = 30)) +
+  ylab(label = 'Number of DEGs') +
+  scale_fill_manual(values = c('Up-regulated' = 'red', 'Down-regulated' = 'blue')) +
+  scale_y_continuous(breaks = seq(-1000, 1000, 100),
+                     labels = c(rev(seq(100, 1000, 100)), seq(0, 1000, 100))) +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 12, color = 'black'),
+        axis.text = element_text(size = 12, color = 'black'),
+        axis.title.y = element_text(size = 14, color = 'black'),
+        axis.title.x = element_blank(),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA))
+ggsave(filename = paste0(results_out, 'InNeuron_DEGcount.tiff'), plot = p.in.deg.count, device = 'tiff', height = 4, width = 5, dpi = 320)
+```
+
+```{r in.gene.clusters}
+all.in.genes <- sapply(
+  X = in.neuron.deg.filtered,
+  FUN = `[[`, 'gene'
+)
+all.in.genes <- Reduce(f = union, x = all.in.genes)
+DefaultAssay(neuron) <- 'RNA'
+tmp <- FetchData(neuron, vars = c(all.in.genes, 'Time', 'celltype_adjusted'), slot = 'data') %>% 
+  dplyr::rename(celltype = celltype_adjusted) %>% 
+  mutate(across(.cols = where(is.numeric), .fns = scale)) %>% 
+  group_by(celltype, Time) %>% 
+  summarise(across(.cols = everything(), .fns = mean)) %>% 
+  ungroup() %>% 
+  reshape2::melt(id.vars = c('celltype', 'Time')) %>% 
+  mutate(obs_id = paste(celltype, variable, sep = '_')) %>% 
+  dplyr::select(c('obs_id', 'Time', 'value')) %>% 
+  reshape2::acast(formula = obs_id ~ Time)
+tmp.dist <- dist(x = tmp)
+tmp.hclust <- hclust(d = tmp.dist, method = 'ward.D2')
+k <- 9
+tmp.cluster <- cutree(tree = tmp.hclust, k = k)
+p.in.gene.clusters <- cbind(as.data.frame(tmp), 'cluster' = tmp.cluster) %>% 
+  tibble::rownames_to_column('obs') %>% 
+  reshape2::melt(id.vars = c('obs', 'cluster')) %>% 
+  mutate(cluster = factor(x = paste('Gene cluster:', cluster),
+                          levels = paste('Gene cluster:', 1:k))) %>% 
+  ggplot(mapping = aes(x = variable, y = value, group = obs, color = cluster)) +
+  geom_line(alpha = 0.3) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  # scale_color_viridis_d() +
+  facet_wrap(. ~ cluster, scales = 'free_y', ncol = 5) +
+  ylab(label = 'Scaled expression') +
+  theme_bw() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 10, color = 'black'),
+        axis.title.y = element_text(size = 14, color = 'black'),
+        axis.title.x = element_blank(),
+        strip.text = element_text(size = 14, color = 'black'))
+p.in.gene.clusters
+ggsave(filename = paste0(results_out, 'DEGclusters_InNeuron.tiff'), plot = p.in.gene.clusters, height = 5, width = 12)
+```
+
+## Gene ontology
+
+Using DEG inputs from previous pair-wise comparisons. I set a GO term node minimum size of 10 to filter terms to which few genes are annotated (ie lower confidence). Standard adjusted p-value threshold of 0.05 and Fisher's test for differences in proportion. The Odds.Ratio formula reduces to Significant / Annotated since the Expected value is scaled according to the number of feasible genes given the input DEG set.
+
+
+### Excitatory neuron GO analysis
+
+```{r run-exneuron-go-analysis}
+ex.go.genes <- unlist(
+  x = lapply(
+    X = ex.neuron.deg.filtered, 
+    FUN = function(x) {
+      split(x, f = ifelse(x$avg_log2FC > 0, yes = 'up', no = 'down'))
+    }
+  ),
+  recursive = FALSE,
+  use.names = TRUE
+)
+gene.universe <- rownames(neuron)
+ex.go.results <- vector(mode = 'list', length = length(ex.go.genes))
+names(ex.go.results) <- names(ex.go.genes)
+for (i in seq_along(ex.go.genes)) {
+  deg.df <- ex.go.genes[[i]]
+  gene.input <- rep(1, length(gene.universe))
+  names(gene.input) <- gene.universe
+  gene.input[deg.df$gene] <- deg.df$p_val_adj
+  go.object <- new(
+    Class = 'topGOdata',
+    ontology = 'BP', 
+    allGenes = gene.input, 
+    geneSel = function(x) return(x < 0.05),
+    annot = annFUN.org,
+    mapping = 'org.Mm.eg.db', 
+    ID = 'Symbol', 
+    nodeSize = 10 # Note: this is arbitrary
+  )
+  go.result <- runTest(
+    object = go.object, 
+    algorithm = 'classic', 
+    statistic = 'fisher'
+  )
+  go.table <- GenTable(
+    object = go.object, 
+    pvalue = go.result, 
+    topNodes = length(usedGO(go.object)), 
+    numChar = 1000
+  )
+  go.table <- go.table %>% 
+    mutate(across(.cols = c('Annotated','Significant','Expected'),
+                  .fns = as.numeric))
+  go.table$pvalue[grepl('<', go.table$pvalue)] <- '1e-30'
+  go.table$pvalue <- as.numeric(go.table$pvalue)
+  q <- go.table$Significant
+  k <- length(go.object@allGenes[go.object@feasible])
+  m <- go.table$Expected
+  t <- length(go.object@allGenes[go.object@feasible])
+  go.table$Odds.Ratio <- (q/k)/(m/t)
+  go.table$Enrichment.Score <- -log10(go.table$pvalue) * go.table$Odds.Ratio
+  ex.go.results[[i]] <- go.table
+}
+rm(deg.df,gene.input,go.object,go.result,go.table,q,k,m,t)
+saveRDS(ex.go.results, file = 'results/exgoresults.rds')
+```
+
+
+```{r inspect-pvalues}
+ex.go.results <- readRDS(file = 'results/exgoresults.rds')
+tmp <- ex.go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Comparison <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 2)
+}
+tmp <- Reduce(f = rbind, x = tmp)
+
+par(mfrow = c(1,2))
+hist(tmp$pvalue, breaks = 50)
+hist(tmp$pvalue[tmp$pvalue != 1], breaks = 50)
+par(mfrow = c(1,1))
+```
+
+I assume that the peak of p-values at are due GO terms with Significant input genes less than the Expected number of genes. Since topGO is probably using a one-tailed fisher test, its default behavior for these cases may be to just assign 1. 
+
+Aside from the p=1 peak, the histogram shows some slight skew right, with many p-values towards smaller values. This is expected for two reasons: 1) we simply reject the null for these genes closely related in function, 2) pvalue peak at 1 may be "redistributed" if p-values were calculated for underrepresented GO terms, 3) many genes related in function are highly correlated, thus there is some invalidity to these p-values to begin with. 
+
+
+```{r save-exneuron-go-results}
+for (i in seq_along(ex.go.results)) {
+  tmp_name <- gsub(pattern = '\\.', replacement = '_', x = names(ex.go.results)[i])
+  tmp_df <- ex.go.results[[i]] %>% 
+    filter(Significant > 5,
+           pvalue < 0.05)
+  write.table(x = tmp_df, quote = FALSE, row.names = FALSE, file = paste0(goResults_out, 'GOresults_ExNeurons_', tmp_name, '.tsv'), sep = '\t')
+}
+```
+
+```{r plot-exneuron-go-results}
+tmp <- ex.go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Comparison <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 2)
+}
+tmp <- tmp[grepl(pattern = paste(c('E19_P4', 'P4_P8', 'P8_P21'), collapse = '|'), names(tmp))]
+p.go <- vector(mode = 'list', length = length(tmp))
+names(p.go) <- names(tmp)
+for (i in seq_along(tmp)) {
+  tmp_dir <- sapply(strsplit(names(tmp)[i], split = '\\.'), `[`, 2)
+  # Note: GO terms in E19_P4.up are UP (more highly expressed) in E19.
+  tmp_dir <- ifelse(test = tmp_dir == 'up',
+                    yes = 'BP downregulated',
+                    no = 'BP upregulated')
+  tmp_label <- sapply(strsplit(names(tmp)[i], split = '\\.'), `[`, 1)
+  tmp_label <- gsub(pattern = '_', replacement = '\U2192', x = tmp_label)
+  tmp_label <- paste(tmp_dir, tmp_label)
+  p.go[[i]] <- tmp[[i]] %>% 
+    filter(Significant > 5) %>% 
+    mutate(Comparison = gsub(pattern = '_', replacement = '"\U2192"', Comparison),
+           Enrichment.Score = -log10(pvalue) * sqrt(Odds.Ratio)) %>% 
+    top_n(n = 50, wt = -log(pvalue)) %>% 
+    top_n(n = 15, wt = Enrichment.Score) %>%
+    ggplot(mapping = aes(x = -log10(pvalue), y = reorder(Term, -log10(pvalue)))) +
+    geom_bar(mapping = aes(fill = log2(Odds.Ratio)),
+             color = 'black',
+             stat = 'identity',
+             width = 0.8) +
+    labs(title = tmp_label) +
+    scale_fill_viridis_c(option = 'D',
+                         limits = c(1,NA),
+                         breaks = c(1,NA),
+                         labels = c('', '')) +
+    theme_bw() + 
+    theme(plot.title = element_text(size = 14, color = 'black'),
+          axis.title.y = element_blank(),
+          axis.title.x = element_text(size = 14, color = 'black'),
+          axis.text = element_text(size = 12, color = 'black'),
+          panel.border = element_rect(color = 'black', fill = NA),
+          panel.background = element_rect(color = 'black', fill = NA)) +
+    guides(fill = guide_colorbar(frame.colour = 'black', ticks.colour = 'black'))
+}
+p.go <- patchwork::wrap_plots(p.go) + 
+  plot_layout(ncol = 2, guides = 'collect', byrow = TRUE) +
+  plot_annotation(title = 'GO analysis of Excitatory neurons',
+                  theme = theme(plot.title = element_text(color = 'black', size = 24)))
+ggsave(filename = paste0(results_out, 'GOresults_ExNeurons_top15.tiff'),
+       plot = p.go, device = 'tiff', height = 13.5, width = 15.5, dpi = 320)
+```
+
+
+### Inhibitory neuron GO analysis
+
+```{r run-inneuron-go-analysis}
+in.go.genes <- unlist(
+  x = lapply(
+    X = in.neuron.deg.filtered, 
+    FUN = function(x) {
+      split(x, f = ifelse(x$avg_log2FC > 0, yes = 'up', no = 'down'))
+    }
+  ),
+  recursive = FALSE,
+  use.names = TRUE
+)
+gene.universe <- rownames(neuron)
+in.go.results <- vector(mode = 'list', length = length(in.go.genes))
+names(in.go.results) <- names(in.go.genes)
+for (i in seq_along(in.go.genes)) {
+  deg.df <- in.go.genes[[i]]
+  gene.input <- rep(1, length(gene.universe))
+  names(gene.input) <- gene.universe
+  gene.input[deg.df$gene] <- deg.df$p_val_adj
+  go.object <- new(
+    Class = 'topGOdata',
+    ontology = 'BP', 
+    allGenes = gene.input, 
+    geneSel = function(x) return(x < 0.05),
+    annot = annFUN.org,
+    mapping = 'org.Mm.eg.db', 
+    ID = 'Symbol', 
+    nodeSize = 10 # Note: this is arbitrary
+  )
+  go.result <- runTest(
+    object = go.object, 
+    algorithm = 'classic', 
+    statistic = 'fisher'
+  )
+  go.table <- GenTable(
+    object = go.object, 
+    pvalue = go.result, 
+    topNodes = length(usedGO(go.object)), 
+    numChar = 1000
+  )
+  go.table <- go.table %>% 
+    mutate(across(.cols = c('Annotated','Significant','Expected'),
+                  .fns = as.numeric))
+  go.table$pvalue[grepl('<', go.table$pvalue)] <- '1e-30'
+  go.table$pvalue <- as.numeric(go.table$pvalue)
+  q <- go.table$Significant
+  k <- length(go.object@allGenes[go.object@feasible])
+  m <- go.table$Expected
+  t <- length(go.object@allGenes[go.object@feasible])
+  go.table$Odds.Ratio <- (q/k)/(m/t)
+  go.table$Enrichment.Score <- -log10(go.table$pvalue) * go.table$Odds.Ratio
+  in.go.results[[i]] <- go.table
+}
+rm(deg.df,gene.input,go.object,go.result,go.table,q,k,m,t)
+saveRDS(in.go.results, file = 'results/ingoresults.rds')
+```
+
+
+```{r inspect-pvalues}
+in.go.results <- readRDS(file = 'results/ingoresults.rds')
+tmp <- in.go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Comparison <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 2)
+}
+tmp <- Reduce(f = rbind, x = tmp)
+
+par(mfrow = c(1,2))
+hist(tmp$pvalue, breaks = 50)
+hist(tmp$pvalue[tmp$pvalue != 1], breaks = 50)
+par(mfrow = c(1,1))
+```
+
+
+```{r save-inneuron-go-results}
+for (i in seq_along(in.go.results)) {
+  tmp_name <- gsub(pattern = '\\.', replacement = '_', x = names(in.go.results)[i])
+  tmp_df <- in.go.results[[i]] %>% 
+    filter(Significant > 5,
+           pvalue < 0.05)
+  write.table(x = tmp_df, quote = FALSE, row.names = FALSE, file = paste0(goResults_out, 'GOresults_InNeurons_', tmp_name, '.tsv'), sep = '\t')
+}
+```
+
+```{r plot-inneuron-go-results}
+tmp <- in.go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Comparison <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 2)
+}
+tmp <- tmp[grepl(pattern = paste(c('E19_P4', 'P4_P8', 'P8_P21'), collapse = '|'), names(tmp))]
+p.go <- vector(mode = 'list', length = length(tmp))
+names(p.go) <- names(tmp)
+for (i in seq_along(tmp)) {
+  tmp_dir <- sapply(strsplit(names(tmp)[i], split = '\\.'), `[`, 2)
+  # Note: GO terms in E19_P4.up are UP (more highly expressed) in E19.
+  tmp_dir <- ifelse(test = tmp_dir == 'up',
+                    yes = 'BP downregulated',
+                    no = 'BP upregulated')
+  tmp_label <- sapply(strsplit(names(tmp)[i], split = '\\.'), `[`, 1)
+  tmp_label <- gsub(pattern = '_', replacement = '\U2192', x = tmp_label)
+  tmp_label <- paste(tmp_dir, tmp_label)
+  p.go[[i]] <- tmp[[i]] %>% 
+    filter(Significant > 5) %>% 
+    mutate(Comparison = gsub(pattern = '_', replacement = '"\U2192"', Comparison),
+           Enrichment.Score = -log10(pvalue) * sqrt(Odds.Ratio)) %>% 
+    top_n(n = 50, wt = -log(pvalue)) %>% 
+    top_n(n = 15, wt = Enrichment.Score) %>%
+    ggplot(mapping = aes(x = -log10(pvalue), y = reorder(Term, -log10(pvalue)))) +
+    geom_bar(mapping = aes(fill = log2(Odds.Ratio)),
+             color = 'black',
+             stat = 'identity',
+             width = 0.8) +
+    labs(title = tmp_label) +
+    scale_fill_viridis_c(option = 'D',
+                         limits = c(1,NA),
+                         breaks = c(1,NA),
+                         labels = c('', '')) +
+    theme_bw() + 
+    theme(plot.title = element_text(size = 14, color = 'black'),
+          axis.title.y = element_blank(),
+          axis.title.x = element_text(size = 14, color = 'black'),
+          axis.text = element_text(size = 12, color = 'black'),
+          panel.border = element_rect(color = 'black', fill = NA),
+          panel.background = element_rect(color = 'black', fill = NA)) +
+    guides(fill = guide_colorbar(frame.colour = 'black', ticks.colour = 'black'))
+}
+p.go <- patchwork::wrap_plots(p.go) + 
+  plot_layout(ncol = 2, guides = 'collect', byrow = TRUE) +
+  plot_annotation(title = 'GO analysis of Inhibitory neurons',
+                  theme = theme(plot.title = element_text(color = 'black', size = 24)))
+ggsave(filename = paste0(results_out, 'GOresults_InNeurons_top15.tiff'),
+       plot = p.go, device = 'tiff', height = 13.5, width = 15.5, dpi = 320)
+```
+
+
+## Fin
+
+```{r}
+sessionInfo()
+```
+

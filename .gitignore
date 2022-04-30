@@ -1,0 +1,24 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Manuscript material and communications
+sc_snRNAseq paper/*
+*.pptx
+*.docx
+*.csv
+notes/*
+
+# Data
+data/*.rds
+data/**/*.rds
+data/*.h5
+data/**/*.h5
+
+# results
+results/*
+
+# Specific scripts
+scripts/*_detection.R
+
