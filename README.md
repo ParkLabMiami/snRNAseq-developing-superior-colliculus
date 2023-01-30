@@ -13,6 +13,21 @@ Direct downloads for the processed data and Seurat objects can be found here: [l
 -   **sc.rds**:
 -   **neuron.rds**:
 
+## Reproducibility
+
+Analysis was run using the files in `scripts` in the following sequence (which more or less follows the sequence of figures in the manuscript):
+
+1.  `preprocessing-quality-control.qmd`
+2.  `integrated-cluster-analysis.qmd`
+3.  `neuronal-cluster-analysis.qmd`
+4.  `development-differential-expression.qmd`
+5.  `cadherin-expression.qmd`
+6.  `axon-guidance-molecules.qmd`
+7.  `cross-reference-comparison.qmd`
+8.  `Pax7-validation.qmd`
+
+Additional `.R` files include various analyses performed for the study but whose results were not included.
+
 ## superior-colliculus-snRNAseq browser
 
 A ShinyApps browser is available to more easily query the gene expression data. Portal is available at <https://parklabmiami.shinyapps.io/superior-colliculus-snRNAseq/>
