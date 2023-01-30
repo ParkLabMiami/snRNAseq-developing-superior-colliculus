@@ -1,0 +1,281 @@
+---
+title: "Expression and validation of Pax7 in the superior colliculus"
+author: "James Choi"
+date: "Last compiled: `r Sys.Date()`"
+format:
+  html:
+    code-fold: false
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    link-external-newwindow: true
+    fig-align: center
+editor: source
+execute: 
+  cache: true
+  warning: false
+  message: false
+project:
+  execute-dir: project
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = 'D:/MiamiProject/Park_snSeq_SuperiorColliculus/')
+```
+
+# Background
+
+
+
+# Setup
+
+```{r}
+results_out <- 'results/Pax7-validation/'
+dir.create(path = results_out)
+```
+
+```{r libraries}
+library(R.matlab)
+library(ComplexHeatmap)
+library(scran)
+library(SingleR)
+library(Seurat)
+# remotes::install_github("mojaveazure/seurat-disk")
+library(SeuratDisk)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(reticulate)
+library(tidyr)
+# reticulate::py_install('Scrublet', pip = TRUE)
+# reticulate::py_install('scanpy', pip = TRUE)
+```
+
+```{r}
+# Plotting colors
+neuron.cols <- c("#c2444c","#e14327","#be6231","#de8d26","#debc22","#b99f3e","#a6c336","#6f9a3e","#63d135","#59c251","#4db873","#36dbbc","#7b85dc","#6074eb","#554ea8","#6934c4","#9253ea","#542298","#ac69d3","#ce4ce2","#d980cc","#cc4bb5","#df35bd","#92337c","#d54681")
+time.cols <- c("#dd4539","#d9b123","#68c545","#514fd1")
+celltype.cols <- RColorBrewer::brewer.pal(n = 12, name = 'Paired')
+celltype.cols[11] <- 'gold'
+
+umap.axes <- ggplot(data.frame(x=10,y=10),aes(x=x,y,y)) +
+  geom_point() +
+  xlim(c(0,1)) + ylim(c(0,1)) +
+  theme_classic() +
+  xlab('UMAP 1') + ylab('UMAP 2') +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_text(size = 10),
+        axis.line = element_line(
+          color = 'black',
+          arrow = arrow(angle = 15, length = unit(.35, 'cm'), type = 'closed')
+        ),
+        panel.background = element_rect(fill = 'transparent', color = NA),
+        panel.border = element_rect(fill = 'transparent', color = NA)
+  )
+layout <- c(
+  patchwork::area(t = 11, l = 1, b = 11, r = 1),
+  patchwork::area(t = 1, l = 1, b = 11, r = 11)
+)
+```
+
+```{r load-data}
+sc <- readRDS(file = 'data/sc.rds')
+neuron <- readRDS(file = 'data/neuron.rds')
+names(neuron.cols) <- levels(neuron$subtype)
+```
+
+
+# Pax7 expression confirmed by in vivo tracing
+
+## UMAP expression
+
+```{r}
+#| fig.height: 5
+#| fig.width: 6
+label_coords = FetchData(neuron, vars = c('UMAP_1', 'UMAP_2', 'subtype')) %>% 
+  group_by(subtype) %>% 
+  summarise(umap.x = mean(UMAP_1), 
+            umap.y = mean(UMAP_2))
+# Adjust specific labels because dark subtype colors make reading the label hard
+adjustLabel = data.frame(
+  subtype = c('IN2', 'IN3', 'IN4', 'IN5', 'IN6', 'IN9', 'IN11', 'IN12'),
+  moveX   = c(  -2,    -2,      0,     2,     0,     2,      0,    1.5),
+  moveY   = c(   2,     0,   -1.5,     0,     1,     0,     -1,    1.5)
+)
+for (i in 1:nrow(adjustLabel)) {
+  j = which(label_coords$subtype == adjustLabel$subtype[i])
+  label_coords$umap.x[j] = label_coords$umap.x[j] + adjustLabel$moveX[i]
+  label_coords$umap.y[j] = label_coords$umap.y[j] + adjustLabel$moveY[i]
+}
+p.neuron.subtype <- DimPlot(neuron, group.by = 'subtype', pt.size = 1) + 
+  geom_text(data = label_coords,
+            mapping = aes(x = umap.x, y = umap.y, label = subtype),
+            size = 5) +
+  scale_color_manual(values = neuron.cols,
+                     name = 'Neuron sub-type') +
+  theme_void() + 
+  theme(plot.title = element_blank(),
+        legend.position = 'none')
+p.neuron.subtype = umap.axes + p.neuron.subtype + plot_layout(design = layout)
+# p.neuron.subtype
+
+p.pax7 = FetchData(object = neuron, vars = c('Pax7','UMAP_1','UMAP_2'), slot = 'data') %>% 
+  arrange(Pax7) %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = Pax7), size = 0.5) +
+  labs(title = 'Pax7 expression') +
+  scale_color_gradient(low = 'grey90', high = 'blue') +
+  theme_void() +
+  theme(panel.background = element_rect(fill = NA, color = NA),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12, angle = 90),
+        plot.title = element_text(size = 14)) +
+  guides(color = guide_colorbar(title = 'Normalized expression',
+                                frame.colour = 'black',
+                                ticks.colour = 'black',
+                                title.position = 'left',
+                                title.vjust = 0))
+p.pax7 = umap.axes + p.pax7 + plot_layout(design = layout)
+# p.pax7
+
+# Figure6BC = cowplot::plot_grid(p.neuron.subtype, p.pax7)
+# Figure6BC
+ggsave(filename = paste0(results_out, 'neuron-pax7-expression.tiff'), plot = p.pax7, device = 'tiff', dpi = 320, height = 4, width = 4.25)
+```
+
+
+## UMAP expression across time
+
+```{r}
+p.pax7.time = FetchData(object = neuron, vars = c('time','subtype','Pax7','UMAP_1','UMAP_2'), slot = 'data') %>% 
+  arrange(Pax7) %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = Pax7), size = 0.5) +
+  facet_wrap(. ~ time, ncol = 4) +
+  scale_color_gradient(low = 'grey90', high = 'blue') +
+  labs(title = 'Pax7 expression across time') +
+  theme(panel.background = element_rect(fill = NA, color = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_text(size = 12),
+        plot.title = element_text(size = 12),
+        strip.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12, angle = 90)) +
+  guides(color = guide_colorbar(title = 'Normalized expression',
+                                frame.colour = 'black',
+                                ticks.colour = 'black',
+                                title.position = 'left',
+                                title.vjust = 0))
+ggsave(filename = paste0(results_out, 'neuron-pax7-expression-across-time1.tiff'), plot = p.pax7.time, device = 'tiff', height = 3, width = 11, dpi = 320)
+
+p.pax7.time2 = FetchData(object = neuron, vars = c('time','subtype','Pax7','UMAP_1','UMAP_2'), slot = 'data') %>% 
+  arrange(Pax7) %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = Pax7), size = 1) +
+  facet_wrap(. ~ time, ncol = 2) +
+  scale_color_gradient(low = 'grey90', high = 'blue') +
+  # labs(title = 'Pax7 expression across time') +
+  theme(panel.background = element_rect(fill = NA, color = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        plot.title = element_text(size = 12),
+        strip.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12, angle = 90)) +
+  guides(color = guide_colorbar(title = 'Normalized expression',
+                                frame.colour = 'black',
+                                ticks.colour = 'black',
+                                title.position = 'left',
+                                title.vjust = 0))
+ggsave(filename = paste0(results_out, 'neuron-pax7-expression-across-time2.tiff'), plot = p.pax7.time2, device = 'tiff', height = 5.5, width = 6, dpi = 320)
+```
+
+
+## Figure 6C
+
+```{r}
+p.pax7 = FetchData(object = neuron, vars = c('Pax7','UMAP_1','UMAP_2'), slot = 'data') %>% 
+  arrange(Pax7) %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = Pax7), size = 0.75) +
+  labs(title = 'Pax7 expression') +
+  scale_color_gradient(low = 'grey90', high = 'blue') +
+  theme_void() +
+  theme(panel.background = element_rect(fill = NA, color = NA),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none',
+        plot.title = element_text(size = 16)) +
+  guides(color = guide_colorbar(title = 'Normalized expression',
+                                frame.colour = 'black',
+                                ticks.colour = 'black',
+                                title.position = 'left',
+                                title.vjust = 0))
+p.pax7 = umap.axes + p.pax7 + plot_layout(design = layout)
+
+p.pax7.time3 = FetchData(object = neuron, vars = c('time','subtype','Pax7','UMAP_1','UMAP_2'), slot = 'data') %>% 
+  arrange(Pax7) %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = Pax7), size = 0.1) +
+  facet_wrap(. ~ time, ncol = 1) +
+  scale_color_gradient(low = 'grey90', high = 'blue') +
+  # labs(title = 'Pax7 expression across time') +
+  theme(panel.background = element_rect(fill = NA, color = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        plot.title = element_text(size = 12),
+        strip.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12, angle = 90)) +
+  guides(color = guide_colorbar(title = 'Normalized expression',
+                                frame.colour = 'black',
+                                ticks.colour = 'black',
+                                title.position = 'left',
+                                title.vjust = 0))
+
+Figure6C = cowplot::plot_grid(p.pax7, p.pax7.time3, ncol = 2, rel_widths = c(1, 0.45))
+ggsave(filename = paste0(results_out, 'Figure6C_neuron-pax7-expression.tiff'), plot = Figure6C, device = 'tiff', height = 5, width = 5*16/11, dpi = 320)
+```
+
+
+## Violin expression by subtype
+
+```{r}
+p.pax7.vln = FetchData(object = neuron, vars = c('celltype_adjusted', 'subtype','Pax7'), slot = 'data') %>% 
+  ggplot(mapping = aes(x = subtype, y = Pax7)) + 
+  geom_violin(mapping = aes(fill = subtype), scale = 'width') +
+  ggbeeswarm::geom_quasirandom(
+    bandwidth = 0.5, size = 0.25, alpha = 0.3, varwidth = TRUE, width = 0.8) +
+  facet_wrap(. ~ celltype_adjusted, scales = 'free_x', drop = TRUE, ncol = 1) +
+  scale_fill_manual(values = neuron.cols) +
+  theme_bw() +
+  labs(y = 'Normalized expression', x = '') +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        legend.position = 'none',
+        strip.text = element_text(size = 12))
+p.pax7.vln
+ggsave(filename = paste0(results_out, 'neuron-pax7-subtype-expression-violin.tiff'), plot = p.pax7.vln, device = 'tiff', height = 4, width = 4, dpi = 320)
+```
+
+
+# Fin
+
+```{r}
+rm(list = ls())
+gc()
+sessionInfo()
+```
+

@@ -1,0 +1,917 @@
+---
+title: "Neuron cluster analysis"
+author: "James Choi"
+date: "Last compiled: `r Sys.Date()`"
+format:
+  html:
+    code-fold: false
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    link-external-newwindow: true
+    fig-align: center
+editor: source
+execute: 
+  cache: false
+  warning: false
+  message: false
+project:
+  execute-dir: project
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = 'D:/MiamiProject/Park_snSeq_SuperiorColliculus/')
+```
+
+
+## Setup
+
+```{r libraries}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(SingleCellExperiment)
+library(scran)
+library(scuttle)
+library(patchwork)
+library(dendextend)
+# library(rhdf5)
+```
+
+```{r samplesheet}
+samplesheet <- read.csv(file = 'data/samplesheet.csv')
+sample_names <- samplesheet$SampleName
+```
+
+```{r directories}
+results_out <- 'results/neuronal-cluster-analysis/'
+dir.create(path = results_out)
+```
+
+```{r utils-params}
+shuffle_rows <- function(df) {
+  df[sample(1:nrow(df), size = nrow(df), replace = FALSE),]
+}
+umap_theme <- theme_bw() + 
+  theme(panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank())
+time.cols <- c("#dd4539","#d9b123","#68c545","#514fd1")
+celltype.cols <- RColorBrewer::brewer.pal(n = 12, name = 'Paired')
+celltype.cols[11] <- 'gold'
+neuron.cols <- c("#c2444c","#e14327","#be6231","#de8d26","#debc22","#b99f3e","#a6c336","#6f9a3e","#63d135","#59c251","#4db873","#36dbbc","#7b85dc","#6074eb","#554ea8","#6934c4","#9253ea","#542298","#ac69d3","#ce4ce2","#d980cc","#cc4bb5","#df35bd","#92337c","#d54681")
+umap.axes <- ggplot(data.frame(x=10,y=10),aes(x=x,y,y)) +
+  geom_point() +
+  xlim(c(0,1)) + ylim(c(0,1)) +
+  theme_classic() +
+  xlab('UMAP 1') + ylab('UMAP 2') +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_text(size = 10),
+        axis.line = element_line(
+          color = 'black',
+          arrow = arrow(angle = 15, length = unit(.35, 'cm'), type = 'closed')
+        ),
+        panel.background = element_rect(fill = 'transparent', color = NA),
+        panel.border = element_rect(fill = 'transparent', color = NA)
+  )
+layout <- c(
+  patchwork::area(t = 11, l = 1, b = 11, r = 1),
+  patchwork::area(t = 1, l = 1, b = 11, r = 11)
+)
+```
+
+## Import data
+
+```{r}
+sc <- readRDS(file = 'data/sc.rds')
+```
+
+
+```{r}
+neuron <- readRDS(file = 'data/neuron.rds')
+names(neuron.cols) <- levels(neuron$subtype)
+```
+
+
+## Nested cluster analysis
+
+### Normalization, dimensional reduction, clustering
+
+```{r neuron-subcluster-analysis}
+DefaultAssay(sc) <- 'RNA'
+neuron <- sc[, sc$celltype %in% c('Excitatory Neuron','Inhibitory Neuron')]
+neuron <- SplitObject(neuron, split.by = 'orig.ident')
+neuron <- lapply(
+  X = neuron,
+  FUN = FindVariableFeatures,
+  nfeatures = 3000
+)
+neuron.features <- SelectIntegrationFeatures(object.list = neuron, nfeatures = 1500)
+anchors <- FindIntegrationAnchors(neuron, anchor.features = neuron.features, normalization.method = 'LogNormalize')
+neuron <- IntegrateData(anchors, normalization.method = 'LogNormalize')
+DefaultAssay(neuron) <- 'integrated'
+neuron <- neuron %>% 
+  ScaleData() %>% 
+  RunPCA()
+ElbowPlot(neuron, ndims = 40)
+pcs <- 1:10
+res = 0.72
+neuron <- neuron %>% 
+  FindNeighbors(dims = pcs) %>% 
+  FindClusters(resolution = 0.8) %>% # Default
+  RunUMAP(dims = pcs) # Default
+neuron <- FindClusters(neuron, resolution = res)
+neuron = RunUMAP(neuron, dims = pcs, min.dist = 0.75, spread = 0.75)
+neuron$time <- factor(
+  x = neuron$time,
+  levels = c('E19','P4','P8','P21')
+)
+```
+
+By empirically comparing cluster results at various resolutions and number of PCs, we determined that `resolution = 0.76` yields an optimal result such as almost every cluster can be defined by a single or set of genes. 
+
+![Different number of PCs shows clusters with few distinct differences](./notes/compare-neuron-cluster-resolutions-1.jpg)
+
+
+![Too low resolution combines both distinct and non-distinct clusters - resolution can be optimized](./notes/compare-neuron-cluster-resolutions-2.jpg)
+
+![Fuzzy distinction between two IN clusters whereby Meis1 is a better marker gene than Nrp2](./notes/compare-neuron-cluster-resolutions-3.jpg)
+
+![Optimal clustering resolution whereby non-distinct clusters are merged and IN7/IN14 separation continues to be defined by Meis1](./notes/compare-neuron-cluster-resolutions-4.jpg)
+
+### Annotation of neuronal subtypes
+
+```{r annotate-neuron-subtypes}
+neuron$celltype_adjusted <- plyr::mapvalues(
+  x = neuron@meta.data[[paste('integrated_snn_res', res, sep = '.')]],
+  from = levels(neuron@meta.data[[paste('integrated_snn_res', res, sep = '.')]]),
+  to = c('Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron')
+)
+neuron$celltype_adjusted <- factor(
+  x= neuron$celltype_adjusted,
+  levels = c('Excitatory Neuron', 'Inhibitory Neuron')
+)
+subtypeMap = c('Excitatory Neuron',
+               'Inhibitory Neuron',
+               'Inhibitory Neuron',
+               'Excitatory Neuron',
+               'Inhibitory Neuron',
+               'Inhibitory Neuron',
+               'Excitatory Neuron',
+               'Inhibitory Neuron',
+               'Excitatory Neuron',
+               'Excitatory Neuron',
+               'Excitatory Neuron',
+               'Excitatory Neuron',
+               'Inhibitory Neuron',
+               'Excitatory Neuron',
+               'Inhibitory Neuron',
+               'Inhibitory Neuron',
+               'Excitatory Neuron',
+               'Excitatory Neuron',
+               'Inhibitory Neuron',
+               'Inhibitory Neuron',
+               'Excitatory Neuron',
+               'Excitatory Neuron',
+               'Excitatory Neuron',
+               'Inhibitory Neuron',
+               'Inhibitory Neuron')
+subtypeMap = sapply(lapply(X = strsplit(subtypeMap, ' '), substr, 1, 1), paste, collapse = '')
+# Note: to match nomenclature in manuscript draft, EN7 and EN8 have been swapped. Clustering results are nearly identical but not idential due to the addition of 2-5 cells (as a results of near identical QC/preprocessing).
+neuron$subtype <- plyr::mapvalues(
+  x = neuron@meta.data[[paste('integrated_snn_res', res, sep = '.')]],
+  from = levels(neuron@meta.data[[paste('integrated_snn_res', res, sep = '.')]]),
+  to = c("EN1",
+         "IN1",
+         "IN2",
+         "EN2", 
+         "IN3", 
+         "IN4", 
+         "EN3",
+         "IN5", 
+         "EN4", 
+         "EN5", 
+         "EN6", 
+         "EN8", 
+         "IN6", 
+         "EN7",
+         "IN7", 
+         "IN8", 
+         "EN9", 
+         "EN10", 
+         "IN9", 
+         "IN10", 
+         "EN11", 
+         "EN12", 
+         "EN13", 
+         "IN11", 
+         "IN12")
+)
+neuron$subtype <- factor(x = neuron$subtype, levels = c(paste0('EN', 1:13), paste0('IN', 1:12)))
+names(neuron.cols) <- levels(neuron$subtype)
+```
+
+### Summarized UMAPs
+
+#### Neuron subtype UMAP
+
+```{r}
+#| fig.height: 5
+#| fig.width: 6
+label_coords = FetchData(neuron, vars = c('UMAP_1', 'UMAP_2', 'subtype')) %>% 
+  group_by(subtype) %>% 
+  summarise(umap.x = mean(UMAP_1), 
+            umap.y = mean(UMAP_2))
+# Adjust specific labels because dark subtype colors make reading the label hard
+adjustLabel = data.frame(
+  subtype = c('IN2', 'IN3', 'IN4', 'IN5', 'IN6', 'IN9', 'IN11', 'IN12'),
+  moveX   = c(  -2,    -2,      0,     2,     0,     2,      0,    1.5),
+  moveY   = c(   2,     0,   -1.5,     0,     1,     0,     -1,    1.5)
+)
+for (i in 1:nrow(adjustLabel)) {
+  j = which(label_coords$subtype == adjustLabel$subtype[i])
+  label_coords$umap.x[j] = label_coords$umap.x[j] + adjustLabel$moveX[i]
+  label_coords$umap.y[j] = label_coords$umap.y[j] + adjustLabel$moveY[i]
+}
+p.neuron.subtype <- DimPlot(neuron, group.by = 'subtype', pt.size = 1) + 
+  geom_text(data = label_coords,
+            mapping = aes(x = umap.x, y = umap.y, label = subtype),
+            size = 5) +
+  scale_color_manual(values = neuron.cols,
+                     name = 'Neuron sub-type') +
+  theme_void() + 
+  theme(plot.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 14))
+p.neuron.subtype = umap.axes + p.neuron.subtype + plot_layout(design = layout)
+ggsave(filename = paste0(results_out, 'neuron_subtype-legend.tiff'), plot = p.neuron.subtype, device = 'tiff', height = 5, width = 6.5)
+p.neuron.subtype
+```
+
+```{r}
+#| fig.height: 5
+#| fig.width: 5
+p.neuron.subtype.noLegend = p.neuron.subtype & theme(legend.position = 'none')
+ggsave(filename = paste0(results_out, 'neuron_subtype.tiff'), plot = p.neuron.subtype.noLegend, device = 'tiff', height = 5, width = 5)
+p.neuron.subtype.noLegend
+```
+
+#### Neuron developmental time-point UMAP
+
+```{r}
+#| fig.height: 5
+#| fig.width: 5.5
+p.neuron.time <- DimPlot(neuron, group.by = 'time', shuffle = TRUE, pt.size = 1) +
+  scale_color_manual(values = time.cols) +
+  theme_void() + 
+  # labs(title = 'Time-point') +
+  guides(color = guide_legend(override.aes = list(size = 6))) + 
+  theme(legend.text = element_text(size = 14),
+        plot.title = element_blank())
+p.neuron.time = umap.axes + p.neuron.time + plot_layout(design = layout)
+ggsave(filename = paste0(results_out, 'neuron_time.tiff'), plot = p.neuron.time, device = 'tiff', height = 5, width = 5.5)
+p.neuron.time
+```
+
+#### Neuron major class UMAP
+
+```{r}
+#| fig.height: 5
+#| fig.width: 5
+p.neuron.celltype_adjusted <- DimPlot(neuron, group.by = 'celltype_adjusted', label = TRUE, label.size = 7, pt.size = 1) + 
+  scale_color_manual(values = celltype.cols) +
+  theme_void() +
+  NoLegend() +
+  # labs(title = 'Neuronal cell-type') +
+  theme(plot.title = element_blank())
+p.neuron.celltype_adjusted = umap.axes + p.neuron.celltype_adjusted + plot_layout(design = layout)
+ggsave(filename = paste0(results_out, 'neuron_celltype-adjusted.tiff'), plot = p.neuron.celltype_adjusted, device = 'tiff', height = 5, width = 5)
+p.neuron.celltype_adjusted
+```
+
+#### Neuron metadata
+
+```{r}
+#| fig.height: 6
+#| fig.width: 6.5
+p.neuron.metadata <- neuron@meta.data %>% 
+  mutate(log10_nCount_RNA = log10(nCount_RNA + 1)) %>% 
+  select(c('subtype', 'nFeature_RNA','log10_nCount_RNA','percent_mt','percent_rp')) %>% 
+  reshape2::melt(id.vars = 'subtype') %>% 
+  ggplot(mapping = aes(x = subtype, y = value)) +
+  geom_violin(mapping = aes(fill = subtype), color = 'black', scale = 'width') +
+  scale_fill_manual(values = neuron.cols) +
+  facet_wrap(. ~ variable, ncol = 1, scales = 'free_y') +
+  xlab(label = 'Neuronal sub-type') +
+  theme_bw() +
+  theme(legend.position = 'none',
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        strip.text = element_text(size = 12))
+ggsave(filename = paste0(results_out, 'neuron_metadata.tiff'), plot = p.neuron.metadata, device = 'tiff', height = 6, width = 6.5)
+p.neuron.metadata
+```
+
+#### Development time-point highlight UMAP
+
+```{r}
+#| fig.height: 6
+#| fig.width: 6
+umapCoords = FetchData(object = neuron, vars = c('UMAP_1', 'UMAP_2'))
+umapCoords = rep(x = list(umapCoords), times = 4)
+for (i in 1:length(levels(neuron$time))) {
+  umapCoords[[i]] = umapCoords[[i]] %>% 
+    tibble::rownames_to_column(var = 'barcode') %>% 
+    tidyr::separate(col = 'barcode',
+                    into = c('barcode','time'), 
+                    sep = '_') %>% 
+    mutate(dummyTime = levels(neuron$time)[i],
+           time = factor(x = time, levels = levels(neuron$time)))
+}
+umapCoords = Reduce(f = rbind, x = umapCoords) %>%  
+  mutate(inTime = ifelse(test = time == dummyTime,
+                         yes = 'inTime',
+                         no = 'outTime')) %>%
+  mutate(dummyTime = factor(x = dummyTime, levels = levels(neuron$time))) %>%
+  arrange(desc(inTime))
+p.highlight = ggplot(data = umapCoords) +
+  geom_point(mapping = aes(x = UMAP_1, y = UMAP_2, color = inTime),
+             size = 0.5) +
+  facet_wrap(. ~ dummyTime) +
+  scale_color_manual(values = c('inTime' = 'black', 'outTime' = 'grey90')) +
+  theme_bw() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        legend.position = 'none',
+        strip.text = element_text(size = 14),
+        axis.title = element_text(size = 12))
+ggsave(filename = paste0(results_out, 'neuron_time-highlight.tiff'), plot = p.highlight, device = 'tiff', height = 6, width = 6, dpi = 320)
+p.highlight
+```
+
+
+#### Summary figure with experimental variables
+
+```{r}
+p.neuron.summary.1 = cowplot::plot_grid(p.neuron.time, p.neuron.celltype_adjusted, ncol = 2, rel_widths = c(1.3, 1))
+p.neuron.summary.2 = cowplot::plot_grid(p.neuron.subtype, p.neuron.summary.1, ncol = 1, rel_heights = c(1, 0.6))
+p.neuron.summary.2
+# p.neuron.summary = cowplot::plot_grid(p.neuron.subtype, p.neuron.time, p.neuron.celltype_adjusted, ncol = 3, rel_widths = c(1.4, 1.2, 1))
+# p.neuron.summary
+ggsave(filename = paste0(results_out, 'neuron_summary.tiff'), plot = p.neuron.summary.2, device = 'tiff', height = 10, width = 8, dpi = 320)
+```
+
+
+#### Summary figure with metadata
+
+```{r neuron-default-summary}
+#| fig.height: 5.5
+#| fig.width: 17
+p.neuron.summary <- cowplot::plot_grid(p.neuron.time, p.neuron.subtype,  p.neuron.metadata, ncol = 3, rel_widths = c(1,1,1.1))
+ggsave(filename = paste0(results_out, 'neuron_summary.tiff'), plot = p.neuron.summary, device = 'tiff', height = 5.5, width = 17)
+p.neuron.summary
+```
+
+
+## Excitatory vs inhibitory DEGs
+
+```{r excitatory-vs-inhibitory}
+Idents(neuron) <- 'celltype_adjusted'
+neuron.deg <- FindMarkers(
+  object = neuron,
+  ident.1 = 'Excitatory Neuron', 
+  ident.2 = 'Inhibitory Neuron',
+  logfc.threshold = 0,
+  assay = 'RNA'
+)
+write.csv(x = neuron.deg, file = paste0(results_out, 'neuron_excitatory-vs-inhibitory_deg.csv'))
+```
+
+```{r excitatory-vs-inhibitory-volcanoplot}
+neuron.deg <- read.csv(file = paste0(results_out, 'neuron_excitatory-vs-inhibitory_deg.csv'))
+# max.pval <- ceiling(max(-log10(neuron.deg$p_val_adj[neuron.deg$p_val_adj != 0])))
+# max.fc <- ceiling(max(abs(neuron.deg$avg_log2FC)) * 10)/10
+label.points <- neuron.deg %>% 
+  filter(p_val_adj < 1e-15) %>% 
+  group_by(avg_log2FC > 0) %>% 
+  top_n(n = 7, wt = -p_val_adj) %>% 
+  top_n(n = 7, wt = avg_log2FC * (pct.1 - pct.2)) %>% 
+  mutate(log_pval = ifelse(test = p_val_adj == 0,
+                           yes = Inf,
+                           no = -log10(p_val_adj)))
+p.neuron.volcano = neuron.deg %>% 
+  mutate(log_pval = ifelse(test = p_val_adj == 0,
+                           yes = Inf,
+                           no = -log10(p_val_adj)),
+         sig = ifelse(test = p_val_adj < 1e-5 & abs(avg_log2FC) > 0.2,
+                      yes = 'sig',
+                      no = 'not.sig')) %>%
+  ggplot() + 
+  geom_point(mapping = aes(x = avg_log2FC, y = log_pval, color = sig),
+             size = 1) +
+  ggrepel::geom_text_repel(
+    data = label.points,
+    mapping = aes(x = avg_log2FC, y = log_pval, label = X),
+    box.padding = 0.5,
+    force = 2
+  ) +
+  labs(subtitle = 'log2(fold-change) > 0 indicates higher in Ex. neuron') +
+  ylab(label = 'log10(adjusted p-value)') +
+  xlab(label = 'Average log2(fold-change)') +
+  scale_color_manual(values = c('sig' = 'red', 'not.sig' = 'black')) +
+  scale_x_continuous(limits = c(-max.fc, max.fc),
+                     breaks = seq(-5, 5, 0.5),
+                     labels = seq(-5, 5, 0.5)) +
+  scale_y_continuous(limits = c(0, max.pval),
+                     breaks = seq(0, 300, 50),
+                     labels = seq(0, 300, 50)) +
+  theme_bw() +
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12))
+ggsave(filename = paste0(results_out, 'neuron-deg_excitatory-inhibitory-volcano.tiff'), plot = p.neuron.volcano, device = 'tiff', dpi = 320, height = 4.5, width = 5)
+```
+
+
+## Subtype differential expression
+
+### Globally distinguishing genes
+
+```{r neuron-deg}
+DefaultAssay(neuron) <- 'RNA'
+Idents(neuron) <- 'subtype'
+neuron.deg <- FindAllMarkers(neuron, only.pos = TRUE)
+write.csv(x = neuron.deg, file = paste0(results_out, 'neuron-subtype-deg.csv'))
+```
+
+```{r neuron-default-deg-dotplot}
+#| fig.height: 8
+#| fig.width: 7
+subtype.deg <- read.csv(file = paste0(results_out, 'neuron-subtype-deg.csv'), row.names = 1)
+subtype.top.deg <- subtype.deg %>%
+  filter(!grepl(pattern = '^Gm|AC|Rik$', x = gene)) %>%
+  group_by(cluster) %>%
+  top_n(n = 5, wt = -p_val_adj) %>%
+  top_n(n = 2, wt = avg_log2FC * (pct.1 - pct.2)^2) %>% # 2022-06-17
+  ungroup()
+tmp <- DotPlot(
+  object = neuron, 
+  assay = 'RNA', 
+  features = rev(unique(subtype.top.deg$gene))
+)
+tmp_celltype <- levels(neuron$subtype)[table(neuron$subtype, neuron$celltype_adjusted)[,'Excitatory Neuron'] > 0]
+tmp$data$celltype <- ifelse(test = tmp$data$id %in% tmp_celltype,
+                            yes = 'Excitatory Neuron', 
+                            no = 'Inhibitory Neuron')
+feature.order <- tmp$data %>% 
+  arrange(celltype, id, features.plot) %>% 
+  .[['features.plot']] %>% 
+  as.character() %>% 
+  unique()
+tmp$data$features.plot <- factor(
+  x = tmp$data$features.plot,
+  levels = feature.order
+)
+p.neuron.markers <- tmp$data %>%
+  ggplot() + 
+  geom_point(mapping = aes(x = id, y = features.plot,
+                           size = pct.exp, fill = avg.exp.scaled),
+             color = 'black', pch = 21) +
+  geom_vline(xintercept = 13.5, color = 'black', lty = 'dashed', linewidth = 1) + 
+  scale_radius(range = c(0,6)) +
+  scale_fill_gradient(low = 'grey80', high = 'blue') +
+  xlab(label = 'Neuron subtype') +
+  ylab(label = 'Genes') +
+  theme_bw() +
+  theme(axis.title = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        legend.position = 'bottom',
+        legend.direction = 'horizontal') +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black',
+                               title = 'Average scaled\nexpression',
+                               title.position = 'top',
+                               title.hjust = 0.5),
+         size = guide_legend(title = 'Percent expression',
+                             title.position = 'top',
+                             title.hjust = 0.5,
+                             override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'neuron-subtype-deg_dotplot.tiff'), plot = p.neuron.markers, device = 'tiff', height = 9, width = 5.75)
+p.neuron.markers
+```
+
+### Within-class DEGs
+
+#### Excitatory subtypes comparison
+
+```{r excitatory-neuron-default-deg}
+DefaultAssay(neuron) <- 'RNA'
+Idents(neuron) <- 'subtype'
+ex.neuron.deg <- FindAllMarkers(neuron[,neuron$celltype_adjusted == 'Excitatory Neuron'], only.pos = TRUE)
+write.csv(x = ex.neuron.deg, file = paste0(results_out, 'excitatory-neuron-subtype-deg.csv'))
+```
+
+```{r excitatory-neuron-deg-dotplot}
+#| fig.height: 8.15
+#| fig.width: 4.85
+Idents(neuron) <- 'subtype'
+ex.neuron.deg <- read.csv(file = paste0(results_out, 'excitatory-neuron-subtype-deg.csv'), row.names = 1)
+neuron.top.deg <- ex.neuron.deg %>% 
+  filter(!grepl(pattern = '^Gm|AC|Rik$', x = gene)) %>%
+  group_by(cluster) %>% 
+  filter(pct.1 > 0.3) %>%
+  top_n(n = 3, wt = -p_val_adj) %>% 
+  top_n(n = 3, wt = avg_log2FC) %>% # 2022-06-17
+  ungroup()
+# # 2022-07-26 in-situ comparison
+# neuron.top.deg <- ex.neuron.deg %>% 
+#   filter(!grepl(pattern = '^Gm|AC|Rik$', x = gene)) %>%
+#   group_by(cluster) %>% 
+#   top_n(n = 5, wt = -p_val_adj) %>% 
+#   top_n(n = 5, wt = avg_log2FC * (pct.1 - pct.2)) %>% # 2022-06-17
+#   ungroup()
+# ###
+tmp <- DotPlot(
+  object = neuron[, neuron$celltype_adjusted == 'Excitatory Neuron'], 
+  assay = 'RNA', 
+  features = rev(unique(neuron.top.deg$gene))
+)
+p.ex.neuron.markers <- tmp$data %>%
+  ggplot() + 
+  geom_point(mapping = aes(x = id, y = features.plot,
+                           size = pct.exp, fill = avg.exp.scaled),
+             color = 'black', pch = 21) +
+  scale_radius(range = c(0,6)) +
+  scale_fill_gradient(low = 'grey80', high = 'blue') +
+  labs(title = 'Excitatory neuron subtypes') +
+  ylab(label = 'Genes') +
+  theme_bw() +
+  theme(axis.title.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 12)) +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black',
+                               title = 'Average\nscaled\nexpression'),
+         size = guide_legend(title = 'Percent\nexpression',
+                             override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'excitatory-neuron_default-clusters_deg.tiff'), plot = p.ex.neuron.markers, device = 'tiff', height = 8.15, width = 4.85)
+p.ex.neuron.markers
+```
+
+```{r excitatory-neuron-subtype-nDEG}
+#| fig.height: 3.5
+#| fig.width: 2
+ex.neuron.deg <- read.csv(file = paste0(results_out, 'excitatory-neuron-subtype-deg.csv'), row.names = 1)
+p.ex.ndeg <- ex.neuron.deg %>%
+  filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  dplyr::count() %>%
+  mutate(cluster = factor(cluster, levels = levels(neuron$subtype))) %>%
+  arrange(n) %>% 
+  ggplot(mapping = aes(x = reorder(cluster, -n), y = n)) + 
+  geom_bar(mapping = aes(fill = cluster), stat = 'identity', color = 'black') +
+  scale_fill_manual(values = neuron.cols) +
+  scale_y_continuous(limits = c(0, 220)) +
+  xlab(label = '') +
+  ylab(label = 'n DEGs') +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 12),
+        legend.position = 'none')
+ggsave(filename = paste0(results_out, 'excitatory-neuron-subtype-deg-count.tiff'), plot = p.ex.ndeg, height = 2.25, width = 4, device = 'tiff', dpi = 320)
+p.ex.ndeg
+```
+
+
+### Inhibitory subtypes comparison
+
+```{r inhibitory-neuron-default-deg}
+DefaultAssay(neuron) <- 'RNA'
+Idents(neuron) <- 'subtype'
+in.neuron.deg <- FindAllMarkers(neuron[,neuron$celltype_adjusted == 'Inhibitory Neuron'], only.pos = TRUE)
+write.csv(x = in.neuron.deg, file = paste0(results_out, 'inhibitory-neuron-subtype-deg.csv'))
+```
+
+```{r inhibitory-neuron-deg-dotplot}
+#| fig.height: 8
+#| fig.width: 5
+in.neuron.deg <- read.csv(file = paste0(results_out, 'inhibitory-neuron-subtype-deg.csv'), row.names = 1)
+neuron.top.deg <- in.neuron.deg %>% 
+  filter(!grepl(pattern = '^Gm|AC|Rik$', x = gene)) %>%
+  filter(pct.1 > 0.5) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 3, wt = -p_val_adj) %>% 
+  top_n(n = 3, wt = avg_log2FC) %>% # 2022-06-17
+  ungroup()
+tmp <- DotPlot(
+  object = neuron[, neuron$celltype_adjusted == 'Inhibitory Neuron'], 
+  assay = 'RNA', 
+  features = rev(unique(neuron.top.deg$gene))
+)
+p.in.neuron.markers <- tmp$data %>%
+  ggplot() + 
+  geom_point(mapping = aes(x = id, y = features.plot,
+                           size = pct.exp, fill = avg.exp.scaled),
+             color = 'black', pch = 21) +
+  scale_radius(range = c(0,6)) +
+  scale_fill_gradient(low = 'grey80', high = 'blue') +
+  labs(title = 'Inhibitory neuron subtypes') +
+  ylab(label = 'Genes') +
+  theme_bw() +
+  theme(axis.title.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 12)) +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black',
+                               title = 'Average\nscaled\nexpression'),
+         size = guide_legend(title = 'Percent\nexpression',
+                             override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'inhibitory-neuron_default-clusters_deg.tiff'), plot = p.in.neuron.markers, device = 'tiff', height = 8, width = 5)
+p.in.neuron.markers
+```
+
+```{r inhibitory-neuron-subtype-nDEG}
+#| fig.heigth: 3.5
+#| fig.width: 2
+in.neuron.deg <- read.csv(file = paste0(results_out, 'inhibitory-neuron-subtype-deg.csv'), row.names = 1)
+p.in.ndeg <- in.neuron.deg %>%
+  filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  dplyr::count() %>%
+  mutate(cluster = factor(cluster, levels = levels(neuron$subtype))) %>%
+  arrange(n) %>% 
+  ggplot(mapping = aes(x = reorder(cluster, -n), y = n)) + 
+  geom_bar(mapping = aes(fill = cluster), stat = 'identity', color = 'black') +
+  scale_fill_manual(values = neuron.cols) +
+  scale_y_continuous(limits = c(0, 220)) +
+  xlab(label = '') +
+  ylab(label = 'n DEGs') +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 12),
+        legend.position = 'none')
+ggsave(filename = paste0(results_out, 'inhibitory-neuron-subtype-deg-count.tiff'), plot = p.in.ndeg, height = 2.25, width = 4, device = 'tiff', dpi = 320)
+p.in.ndeg
+```
+
+
+## Quantifying subtype similarities and differences
+
+```{r neuron-subtype-dendrogram}
+DefaultAssay(neuron) <- 'RNA'
+neuron.mat <- FetchData(
+  object = neuron,
+  vars = c(neuron[['integrated']]@var.features, 'subtype'),
+  slot = 'data'
+) %>% 
+  mutate(across(where(is.numeric), .fns = scale)) %>% 
+  group_by(subtype) %>% 
+  summarise(across(.fns = mean)) %>% 
+  tibble::column_to_rownames(var = 'subtype') %>% 
+  as.matrix()
+# Euclidean distance matrix between scaled expression values
+neuron.dist <- dist(x = neuron.mat, method = 'euclidean')
+# neuron.dist <- cor(x = t(neuron.mat))
+# Note: ward.D2 first squares euclidean distance before agglomeration
+neuron.cluster <- hclust(d = neuron.dist, method = 'ward.D2')
+
+{
+  tiff(filename = paste0(results_out, 'neuron-subtype-dendrogram.tiff'), height = 5, width = 2.75, res = 320, units = 'in')
+  # Generate dendrogram
+  par(mar = c(0,0,0,2.5))
+  neuron.cluster %>% 
+    as.dendrogram(hang = -1) %>%
+    set('leaves_pch', 16) %>% 
+    set('leaves_cex', 2.5) %>%
+    # set('labels_cex' = )
+    # set('branches_k_color', value = c('purple','red'), k = 2) %>%
+    set('leaves_col', neuron.cols[neuron.cluster$order]) %>% 
+    dendsort::dendsort(isReverse = TRUE) %>% 
+    plot(horiz = TRUE, axes = FALSE)
+  dev.off()
+}
+```
+
+## Neuron subtype proportions across development
+
+### Excitatory neuron proportions
+
+```{r}
+#| fig.height: 5.5
+#| fig.width: 5.5
+prop.data <- table('Subtype' = neuron$subtype,
+                   'time' = neuron$time,
+                   'Celltype' = neuron$celltype_adjusted) %>% 
+  data.frame() %>% 
+  filter(Celltype == 'Excitatory Neuron') %>% 
+  group_by(time) %>% 
+  mutate(Freq = Freq / sum(Freq)) %>% 
+  filter(Freq > 0) %>% 
+  mutate(Subtype = droplevels(Subtype))
+prop.cols <- neuron.cols[names(neuron.cols) %in% prop.data$Subtype]
+p.ex.proportion <- prop.data %>%
+  ggplot(mapping = aes(x = time, y = Freq)) +
+  geom_bar(mapping = aes(fill = Subtype), stat = 'identity', color = 'black') +
+  scale_fill_manual(values = prop.cols, drop = TRUE) +
+  # labs(title = 'Excitatory neuron sub-type proportions') +
+  ylab(label = 'Proportion (of excitatory neurons)') +
+  scale_y_continuous(expand = c(0,0), breaks = seq(0,1,0.2)) +
+  scale_x_discrete(expand = c(0,0)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        plot.title = element_blank(),
+        panel.grid = element_blank())
+ggsave(filename = paste0(results_out, 'neuron_ex-neuron-proportion.tiff'), plot = p.ex.proportion, device = 'tiff', height = 3.75, width = 4)
+p.ex.proportion
+```
+
+### Inhibitory neuron proportions
+
+```{r}
+#| fig.height: 5.5
+#| fig.width: 5.5
+prop.data <- table('Subtype' = neuron$subtype,
+                   'time' = neuron$time,
+                   'Celltype' = neuron$celltype_adjusted) %>% 
+  data.frame() %>% 
+  filter(Celltype == 'Inhibitory Neuron') %>% 
+  group_by(time) %>% 
+  mutate(Freq = Freq / sum(Freq)) %>% 
+  filter(Freq > 0) %>% 
+  mutate(Subtype = droplevels(Subtype))
+prop.cols <- neuron.cols[names(neuron.cols) %in% prop.data$Subtype]
+p.in.proportion <- prop.data %>% 
+  ggplot(mapping = aes(x = time, y = Freq)) +
+  geom_bar(mapping = aes(fill = Subtype), stat = 'identity', color = 'black') +
+  scale_fill_manual(values = prop.cols) +
+  # labs(title = 'Inhibitory neuron sub-type proportions') +
+  ylab(label = 'Proportion (of inhibitory neurons)') +
+  scale_y_continuous(expand = c(0,0), breaks = seq(0,1,0.2)) +
+  scale_x_discrete(expand = c(0,0)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        plot.title = element_text(size = 12),
+        panel.grid = element_blank())
+ggsave(filename = paste0(results_out, 'neuron_in-neuron-proportion.tiff'), plot = p.in.proportion, device = 'tiff', height = 3.75, width = 4)
+p.in.proportion
+```
+
+
+```{r}
+ex.prop.data <- round(prop.table(table(neuron$subtype[neuron$celltype_adjusted == 'Excitatory Neuron'], neuron$time[neuron$celltype_adjusted == 'Excitatory Neuron']), margin = 2), digits = 4)
+in.prop.data <- round(prop.table(table(neuron$subtype[neuron$celltype_adjusted == 'Inhibitory Neuron'], neuron$time[neuron$celltype_adjusted == 'Inhibitory Neuron']), margin = 2), digits = 4)
+write.csv(ex.prop.data, file = paste0(results_out, 'ExNeuron-subtype-proportions.csv'))
+write.csv(in.prop.data, file = paste0(results_out, 'InNeuron-subtype-proportions.csv'))
+```
+
+### Subtype proportions faceted by neuronal class
+ 
+```{r neuron-subtype-proportion-2}
+#| fig.height: 4.5
+#| fig.width: 7
+neuron.prop <- prop.table(x = table(
+  'subtype' = neuron$subtype, 
+  'celltype_adjusted' = neuron$celltype_adjusted,
+  'time' = neuron$time),
+  margin = c(2,3)
+) %>%
+  as.data.frame() %>% 
+  mutate(tmp.celltype = ifelse(test = grepl('EN', subtype),
+                               yes = 'Excitatory Neuron',
+                               no = 'Inhibitory Neuron')) %>% 
+  filter(tmp.celltype == celltype_adjusted) %>% 
+  ggplot() + 
+  geom_bar(mapping = aes(x = subtype, y = Freq, fill = time), 
+           position = 'dodge',
+           color = 'black',
+           stat = 'identity', width = 0.75) +
+  facet_wrap(. ~ celltype_adjusted, 
+             scales = 'free_x',
+             drop = TRUE, ncol = 1) + #
+  ylab(label = 'Proportion\n(by neuron class per time-point)') +
+  scale_fill_manual(values = time.cols, name = 'Time-point') +
+  theme_bw() + 
+  scale_y_continuous(expand = c(0,0), breaks = seq(0,1,0.05), labels = seq(0,1,0.05)) + 
+  theme(axis.text.x = element_text(size = 12, angle = 65, hjust = 1, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 12, color = 'black'),
+        strip.text = element_text(size = 14, color = 'black'),
+        legend.text = element_text(size = 12, color = 'black'),
+        legend.title = element_text(size = 12, color = 'black'),
+        legend.position = 'bottom',
+        legend.direction = 'horizontal',
+        legend.box.margin = margin(0,0,0,0))
+ggsave(filename = paste0(results_out, 'neuron_subtype_proportion-split-time.tiff'), plot = neuron.prop, device = 'tiff', height = 4.75, width = 5, dpi = 320)
+neuron.prop
+```
+
+## Other metadata
+
+```{r}
+#| fig.height: 5.5
+#| fig.width: 6
+p.metadata = neuron@meta.data[c('subtype','nFeature_RNA','nCount_RNA','percent_mt', 'percent_rp')] %>% 
+  mutate(nCount_RNA = log10(nCount_RNA)) %>% 
+  dplyr::rename('# genes detected' = nFeature_RNA,
+                'log10(# UMI detected)' = nCount_RNA,
+                'Percent mitochondrial reads' = percent_mt,
+                'Percent ribosomal reads' = percent_rp) %>% 
+  reshape2::melt(id.vars = c('subtype')) %>% 
+  ggplot(mapping = aes(x = subtype, y = value)) +
+  geom_violin(mapping = aes(fill = subtype), color = 'black', scale = 'width') +
+  scale_fill_manual(values = neuron.cols) +
+  facet_wrap(. ~ variable, scales = 'free_y', ncol = 1) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        strip.text = element_text(size = 12),
+        legend.position = 'none')
+ggsave(filename = paste0(results_out, 'neuron-metadata-violin.tiff'), plot = p.metadata, device = 'tiff', height = 5.5, width = 6, dpi = 320)
+p.metadata
+```
+
+## Additional gene expression
+
+```{r}
+
+```
+
+
+## End
+
+```{r}
+saveRDS(neuron, 'data/neuron.rds')
+```
+
+```{r fin}
+rm(list = ls())
+gc(verbose=FALSE)
+sessionInfo()
+```
+
+
+<!-- ```{r} -->
+<!-- tmp <- readRDS(file = 'data/neuron.rds') -->
+<!-- sharedCols = intersect( -->
+<!--   x = gsub(pattern = '\\.', replacement = '_', x = colnames(neuron)), -->
+<!--   y = colnames(tmp) -->
+<!-- ) -->
+<!-- tmp <- tmp[, sharedCols] -->
+<!-- rowOrder = match(x = rownames(tmp@meta.data), table = rownames(neuron@meta.data)) -->
+<!-- identical(rownames(tmp@meta.data), rownames(neuron@meta.data)[rowOrder]) -->
+<!-- prop.table(table(tmp$subtype, neuron$integrated_snn_res.0.72[rowOrder]), margin = 1) %>% as.data.frame() %>% ggplot(mapping = aes(x = Var1, y = Var2)) + geom_tile(mapping = aes(fill = Freq)) -->
+<!-- ``` -->
+

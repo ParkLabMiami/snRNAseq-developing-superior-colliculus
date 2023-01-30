@@ -5,16 +5,21 @@
 
 # Manuscript material and communications
 sc_snRNAseq paper/*
+notes/*
 *.pptx
 *.docx
 *.csv
-notes/*
 
 # Data
-data/*.rds
-data/**/*.rds
-data/*.h5
-data/**/*.h5
+*.rds
+*.h5
+*.RData
+*.loom
+
+# Referenced data
+ref/Xie*
+ref/GSM3017261*
+ref/Cheung*
 
 # results
 results/*
@@ -24,3 +29,10 @@ scripts/*_detection.R
 scripts/*.pdf
 scripts/*.html
 
+# We've moved to Quarto now
+scripts/*.Rmd
+
+# Random files, cache, etc.
+*.tmp
+*_cache
+*_files

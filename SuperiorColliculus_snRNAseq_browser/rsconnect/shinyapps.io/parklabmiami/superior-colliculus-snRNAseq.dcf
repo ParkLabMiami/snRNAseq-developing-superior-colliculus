@@ -1,0 +1,11 @@
+name: superior-colliculus-snRNAseq
+title:
+username:
+account: parklabmiami
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 6739753
+bundleId: 6477017
+url: https://parklabmiami.shinyapps.io/superior-colliculus-snRNAseq/
+when: 1667595997.18508
+lastSyncTime: 1667595997.18509

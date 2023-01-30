@@ -1,0 +1,448 @@
+---
+title: "Cadherin expresion in developing SC"
+author: "James Choi"
+date: "Last compiled: `r Sys.Date()`"
+format:
+  html:
+    code-fold: false
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    link-external-newwindow: true
+    fig-align: center
+editor: source
+execute: 
+  cache: false
+  warning: false
+  message: false
+project:
+  execute-dir: project
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = 'D:/MiamiProject/Park_snSeq_SuperiorColliculus/')
+```
+
+
+## Setup
+
+```{r}
+results_out <- 'results/cadherin-expression/'
+dir.create(path = results_out)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+```
+
+```{r}
+sc <- readRDS(file = 'data/sc.rds')
+neuron <- readRDS(file = 'data/neuron.rds')
+```
+
+```{r prep}
+Idents(sc) <- 'celltype'
+DefaultAssay(sc) <- 'RNA'
+Idents(neuron) <- 'celltype'
+DefaultAssay(neuron) <- 'RNA'
+```
+
+```{r}
+str_wrap_factor <- function(x, ...) {
+  levels(x) <- stringr::str_wrap(levels(x), ...)
+  x
+}
+DotPlot2 <- function(object, features, xlab, ylab) {
+  tmp <- DotPlot(object, assay = 'RNA', features = features)
+  tmp <- tmp$data %>% 
+    ggplot(mapping = aes(x = features.plot, y = id)) +
+    geom_point(
+      mapping = aes(fill = avg.exp.scaled, size = pct.exp),
+      pch = 21, 
+      color = 'black'
+    ) +
+    ylab(label = ylab) +
+    xlab(label = xlab) +
+    scale_fill_gradient2(
+      low = 'blue2', 
+      high = 'red2', 
+      name = 'Average\nscaled\nexpression'
+    ) +
+    scale_radius(name = 'Percent\ndetected', range = c(0,6)) +
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+          axis.text.y = element_text(size = 12),
+          axis.title = element_text(size = 12),
+          legend.text = element_text(size = 12),
+          legend.position = 'bottom',
+          legend.direction = 'horizontal') +
+    guides(fill = guide_colorbar(frame.colour = 'black',
+                                 ticks.colour = 'black'),
+           size = guide_legend(override.aes = list(fill = 'black')))
+  return(tmp)
+}
+SplitDotPlot <- function(object, feature, group.by = 'subtype.named', split.by) {
+  tmp <- FetchData(
+    object = object, 
+    vars = c(feature, group.by, split.by),
+    slot = 'data'
+  )
+  pct.exp <- tmp %>% 
+    group_by(across(all_of(c(group.by, split.by)))) %>% 
+    summarise(across(where(is.numeric), .fns = function(a) mean(a > 0))) %>% 
+    reshape2::melt(id.vars = c(group.by, split.by)) %>% 
+    dplyr::rename(pct.exp = 'value')
+  avg.exp <- tmp %>% 
+    mutate(across(where(is.numeric), .fns = scale)) %>% 
+    group_by(across(all_of(c(group.by, split.by)))) %>% 
+    summarise(across(where(is.numeric), .fns = function(a) mean(a))) %>% 
+    reshape2::melt(id.vars = c(group.by, split.by)) %>% 
+    dplyr::rename(avg.exp = 'value')
+  tmp <- full_join(pct.exp, avg.exp) %>% 
+    ggplot() +
+    geom_point(mapping = aes(x = !!as.name(split.by),
+                             y = !!as.name(group.by),
+                             fill = avg.exp,
+                             size = pct.exp),
+               pch = 21) +
+    facet_wrap(. ~ variable) +
+    scale_radius(name = 'Percent\ndetected', range = c(0,6)) +
+    scale_fill_gradient2(
+      low = 'blue2', 
+      high = 'red2', 
+      name = 'Average\nscaled\nexpression'
+    ) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+          axis.text.y = element_text(size = 12),
+          axis.title = element_text(size = 12),
+          legend.text = element_text(size = 12),
+          legend.position = 'bottom',
+          legend.direction = 'horizontal') +
+    guides(fill = guide_colorbar(frame.colour = 'black',
+                                 ticks.colour = 'black'),
+           size = guide_legend(override.aes = list(fill = 'black')))
+  return(tmp)
+}
+ScaleColorMapping <- function(x, quantile.cutoff = 0.01) {
+  vals <- quantile(x[!is.na(x)], probs = c(quantile.cutoff, 1 - quantile.cutoff))
+  max.allowed.x <- max(vals)
+  min.allowed.x <- min(vals)
+  x[x > max.allowed.x & !is.na(x)] <- max.allowed.x
+  x[x < min.allowed.x & !is.na(x)] <- min.allowed.x
+  return(x)
+}
+```
+
+
+## Genes of interest: Cadherins
+
+```{r}
+cadherins <- c("CDH1", "CDH2", "CDH12", "CDH3", "DSG1", "DSG2", "DSG3", "DSG4", "DSC1", "DSC2", "DSC3", "PCDH1", "PCDH7", "PCDH8", "PCDH9", "PCDH10", "PCDH11X,", "PCDH11Y", "PCDH12", "PCDH15", "PCDH17", "PCDH18", "PCDH19", "PCDH20", "PCDHA1", "PCDHA2", "PCDHA3", "PCDHA4", "PCDHA5", "PCDHA6", "PCDHA7", "PCDHA8", "PCDHA9", "PCDHA10", "PCDHA11", "PCDHA12", "PCDHA13", "PCDHAC1", "PCDHAC2", "PCDHB1", "PCDHB2", "PCDHB3", "PCDHB4", "PCDHB5", "PCDHB6", "PCDHB7", "PCDHB8", "PCDHB9", "PCDHB10", "PCDHB11", "PCDHB12", "PCDHB13", "PCDHB14", "PCDHB15", "PCDHB16", "PCDHB17", "PCDHB18", "PCDHGA1", "PCDHGA2", "PCDHGA3", "PCDHGA4", "PCDHGA5", "PCDHGA6", "PCDHGA7", "PCDHGA8", "PCDHGA9", "PCDHGA10", "PCDHGA11", "PCDHGA12", "PCDHGB1", "PCDHGB2", "PCDHGB3", "PCDHGB4", "PCDHGB5", "PCDHGB6", "PCDHGB7", "PCDHGC3", "PCDHGC4", "PCDHGC5", "FAT", "FAT2", "FAT4", "CDH4", "CDH5", "CDH6", "CDH7", "CDH8", "CDH9", "CDH10", "CDH11", "CDH13", "CDH15", "CDH16", "CDH17", "CDH18", "CDH19", "CDH20", "CDH23", "CDH22", "CDH24", "CDH26", "CDH28", "CELSR1", "CELSR2", "CELSR3", "CLSTN1", "CLSTN2", "CLSTN3", "DCHS1", "DCHS2", "LOC389118", "PCLKC", "RESDA1", "RET")
+cadherins <- tools::toTitleCase(tolower(cadherins))
+cadherins <- cadherins[which(cadherins %in% rownames(sc[['RNA']]@counts))]
+```
+
+
+## Celltype cadherin expression 
+
+Averaged expression across time:
+
+```{r all-cadherins}
+#| fig.height: 4
+#| fig.width: 20
+p.cadherin <- DotPlot2(sc, features = sort(cadherins), ylab = 'Cell-type', xlab = 'Cadherin genes')
+ggsave(filename = paste0(results_out, 'cadherins-all_celltype-dotplot.tiff'), plot = p.cadherin, device = 'tiff', height = 4, width = 20, dpi = 320)
+p.cadherin
+```
+
+```{r detected-cadherins}
+#| fig.height: 3.75
+#| fig.width: 9.5
+cadherin.avg.pct <- sparseMatrixStats::rowMeans2(sc[['RNA']]@counts[cadherins,] > 1)
+cadherins.detected <- cadherins[which(cadherin.avg.pct > 0.001)]
+p.detected <- DotPlot2(sc, features = sort(cadherins.detected), ylab = '', xlab = 'Cadherin genes')
+ggsave(filename = paste0(results_out, 'cadherins-detected_celltype-dotplot.tiff'), plot = p.detected, device = 'tiff', height = 3.5, width = 9.75, dpi = 320)
+p.detected
+```
+
+### Expression across time
+
+Expression split across time:
+
+```{r}
+#| fig.height: 18
+#| fig.width: 13
+cad.data <- FetchData(
+  object = sc, 
+  vars = c('celltype','time', sort(cadherins)),
+  slot = 'data'
+)
+pct.exp <- cad.data %>% 
+  group_by(across(all_of(c('celltype', 'time')))) %>% 
+  summarise(across(where(is.numeric), .fns = function(a) mean(a > 0))) %>% 
+  reshape2::melt(id.vars = c('celltype', 'time')) %>% 
+  dplyr::rename(pct.exp = 'value')
+avg.exp <- cad.data %>% 
+  mutate(across(where(is.numeric), .fns = scale)) %>% 
+  group_by(across(all_of(c('celltype', 'time')))) %>% 
+  summarise(across(where(is.numeric), .fns = function(a) mean(a))) %>% 
+  reshape2::melt(id.vars = c('celltype', 'time')) %>% 
+  dplyr::rename(avg.exp = 'value')
+cad.data.plot <- full_join(pct.exp, avg.exp) %>% 
+  mutate(scalecolormapping_avg.exp = ScaleColorMapping(avg.exp)) %>% 
+  mutate(celltype = str_wrap_factor(celltype, width = 15)) %>% 
+  mutate(variable = factor(variable, levels = rev(levels(variable)))) %>% 
+  ggplot() +
+  geom_point(mapping = aes(x = time, y = variable,
+                           fill = scalecolormapping_avg.exp, size = pct.exp),
+             pch = 21) +
+  facet_grid(. ~ celltype) +
+  scale_radius(name = 'Percent\ndetected', range = c(0,6)) +
+  scale_fill_gradient2(
+    low = 'blue2', 
+    high = 'red2', 
+    name = 'Average\nscaled\nexpression'
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size = 12),
+        strip.text = element_text(size = 12)) +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black'),
+         size = guide_legend(override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'cadherins-all_celltype-time-dotplot.tiff'), plot = cad.data.plot, height = 18, width = 13, dpi = 320)
+cad.data.plot
+```
+
+```{r}
+#| fig.height: 9
+#| fig.width: 13
+cadherin.avg.pct <- sparseMatrixStats::rowMeans2(sc[['RNA']]@counts[cadherins,] > 1)
+cadherins.detected <- cadherins[which(cadherin.avg.pct > 0.001)]
+cad.data <- FetchData(
+  object = sc, 
+  vars = c('celltype','time', sort(cadherins.detected)),
+  slot = 'data'
+)
+pct.exp <- cad.data %>% 
+  group_by(across(all_of(c('celltype', 'time')))) %>% 
+  summarise(across(where(is.numeric), .fns = function(a) mean(a > 0))) %>% 
+  reshape2::melt(id.vars = c('celltype', 'time')) %>% 
+  dplyr::rename(pct.exp = 'value')
+avg.exp <- cad.data %>% 
+  mutate(across(where(is.numeric), .fns = scale)) %>% 
+  group_by(across(all_of(c('celltype', 'time')))) %>% 
+  summarise(across(where(is.numeric), .fns = function(a) mean(a))) %>% 
+  reshape2::melt(id.vars = c('celltype', 'time')) %>% 
+  dplyr::rename(avg.exp = 'value')
+cad.data.plot <- full_join(pct.exp, avg.exp) %>% 
+  mutate(scalecolormapping_avg.exp = ScaleColorMapping(avg.exp)) %>% 
+  mutate(celltype = str_wrap_factor(celltype, width = 15)) %>% 
+  mutate(variable = factor(variable, levels = rev(levels(variable)))) %>% 
+  ggplot() +
+  geom_point(mapping = aes(x = time, y = variable,
+                           fill = scalecolormapping_avg.exp, size = pct.exp),
+             pch = 21) +
+  facet_grid(. ~ celltype) +
+  scale_radius(name = 'Percent\ndetected', range = c(0,6)) +
+  scale_fill_gradient2(
+    low = 'blue2', 
+    high = 'red2', 
+    name = 'Average\nscaled\nexpression'
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size = 12),
+        strip.text = element_text(size = 12)) +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black'),
+         size = guide_legend(override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'cadherins-detected_celltype-time-dotplot.tiff'), plot = cad.data.plot, device = 'tiff', height = 9, width = 13, dpi = 320)
+cad.data.plot
+```
+
+### Compute whether any are differentially expressed
+
+```{r}
+#| fig.height: 3.75
+#| fig.width: 10
+DefaultAssay(sc) <- 'RNA'
+Idents(sc) <- 'celltype'
+cadherin.markers <- FindAllMarkers(
+  object = sc,
+  logfc.threshold = 0.1,
+  features = cadherins,
+  only.pos = TRUE
+)
+cadherin.markers.sig <- cadherin.markers %>% filter(p_val_adj < 0.01)
+p.sig <- p.detected + 
+  geom_point(data = cadherin.markers.sig, mapping = aes(x = gene, y = cluster),
+             shape = 8) +
+  labs(subtitle = '* FDR < 0.01')
+ggsave(filename = paste0(results_out, 'cadherins-significant_celltype-dotplot.tiff'), plot = p.sig, height = 3.75, width = 10, dpi = 320)
+p.sig
+```
+
+## Neuron subtype cadherin expression 
+
+```{r}
+table(neuron$subtype)
+Idents(neuron) <- 'subtype'
+```
+
+```{r}
+#| fig.height: 7
+#| fig.width: 20
+p.cadherin.neuron <- DotPlot2(neuron, features = sort(cadherins), ylab = 'Neuron subtype', xlab = 'Cadherin genes')
+ggsave(filename = paste0(results_out, 'cadherins-all_neuron-subtype-dotplot.tiff'), plot = p.cadherin.neuron, device = 'tiff', height = 7, width = 20, dpi = 320)
+p.cadherin.neuron
+```
+
+```{r}
+#| fig.height: 7
+#| fig.width: 9.5
+cadherin.avg.pct <- sparseMatrixStats::rowMeans2(neuron[['RNA']]@counts[cadherins,] > 1)
+cadherins.detected <- cadherins[which(cadherin.avg.pct > 0.001)]
+p.detected.neuron <- DotPlot2(neuron, features = sort(cadherins.detected), ylab = 'Neuron subtype', xlab = 'Cadherin genes')
+ggsave(filename = paste0(results_out, 'cadherins-detected_neuron-subtype-dotplot.tiff'), plot = p.detected.neuron, device = 'tiff', height = 7, width = 9.5, dpi = 320)
+p.detected.neuron
+```
+
+### Expression across time
+
+Expression split across time:
+
+```{r , fig.height=12, fig.width=18}
+#| fig.height: 12
+#| fig.width: 18
+cad.data <- FetchData(
+  object = neuron, 
+  vars = c('subtype','time', sort(cadherins)),
+  slot = 'data'
+)
+pct.exp <- cad.data %>% 
+  group_by(across(all_of(c('subtype', 'time')))) %>% 
+  summarise(across(where(is.numeric), .fns = function(a) mean(a > 0))) %>% 
+  reshape2::melt(id.vars = c('subtype', 'time')) %>% 
+  dplyr::rename(pct.exp = 'value')
+avg.exp <- cad.data %>% 
+  mutate(across(where(is.numeric), .fns = scale)) %>% 
+  group_by(across(all_of(c('subtype', 'time')))) %>% 
+  summarise(across(where(is.numeric), .fns = function(a) mean(a))) %>% 
+  reshape2::melt(id.vars = c('subtype', 'time')) %>% 
+  dplyr::rename(avg.exp = 'value')
+cad.data.plot <- full_join(pct.exp, avg.exp) %>% 
+  mutate(scalecolormapping_avg.exp = ScaleColorMapping(avg.exp)) %>% 
+  mutate(subtype = str_wrap_factor(subtype, width = 15)) %>% 
+  mutate(variable = factor(variable, levels = rev(levels(variable)))) %>% 
+  ggplot() +
+  geom_point(mapping = aes(x = time, y = variable,
+                           fill = scalecolormapping_avg.exp, size = pct.exp),
+             pch = 21) +
+  facet_grid(. ~ subtype) +
+  scale_radius(name = 'Percent\ndetected', range = c(0,6)) +
+  scale_fill_gradient2(
+    low = 'blue2', 
+    high = 'red2', 
+    name = 'Average\nscaled\nexpression'
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size = 12),
+        strip.text = element_text(size = 12)) +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black'),
+         size = guide_legend(override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'cadherins-all_neuron-subtype-time-dotplot.tiff'), plot = cad.data.plot, height = 18, width = 22, dpi = 320)
+cad.data.plot
+```
+
+```{r}
+#| fig.height: 8
+#| fig.width: 22
+cadherin.avg.pct <- sparseMatrixStats::rowMeans2(sc[['RNA']]@counts[cadherins,] > 1)
+cadherins.detected <- cadherins[which(cadherin.avg.pct > 0.001)]
+cad.data <- FetchData(
+  object = neuron, 
+  vars = c('subtype','time', sort(cadherins.detected)),
+  slot = 'data'
+)
+pct.exp <- cad.data %>% 
+  group_by(across(all_of(c('subtype', 'time')))) %>% 
+  summarise(across(where(is.numeric), .fns = function(a) mean(a > 0))) %>% 
+  reshape2::melt(id.vars = c('subtype', 'time')) %>% 
+  dplyr::rename(pct.exp = 'value')
+avg.exp <- cad.data %>% 
+  mutate(across(where(is.numeric), .fns = scale)) %>% 
+  group_by(across(all_of(c('subtype', 'time')))) %>% 
+  summarise(across(where(is.numeric), .fns = function(a) mean(a))) %>% 
+  reshape2::melt(id.vars = c('subtype', 'time')) %>% 
+  dplyr::rename(avg.exp = 'value')
+cad.data.plot <- full_join(pct.exp, avg.exp) %>% 
+  mutate(scalecolormapping_avg.exp = ScaleColorMapping(avg.exp)) %>% 
+  mutate(subtype = str_wrap_factor(subtype, width = 15)) %>% 
+  mutate(variable = factor(variable, levels = rev(levels(variable)))) %>% 
+  ggplot() +
+  geom_point(mapping = aes(x = time, y = variable,
+                           fill = scalecolormapping_avg.exp, size = pct.exp),
+             pch = 21) +
+  facet_grid(. ~ subtype) +
+  scale_radius(name = 'Percent\ndetected', range = c(0,6)) +
+  scale_fill_gradient2(
+    low = 'blue2', 
+    high = 'red2', 
+    name = 'Average\nscaled\nexpression'
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size = 12),
+        strip.text = element_text(size = 12)) +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black'),
+         size = guide_legend(override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'cadherins-detected_neuron-subtype-time-dotplot.tiff'), plot = cad.data.plot, height = 8, width = 22, dpi = 320)
+cad.data.plot
+```
+
+
+### Compute whether any are differentially expressed
+
+```{r}
+#| fig.height: 7
+#| fig.width: 9.5
+DefaultAssay(neuron) <- 'RNA'
+Idents(neuron) <- 'subtype'
+cadherin.markers.neuron <- FindAllMarkers(
+  object = neuron,
+  logfc.threshold = 0.25,
+  features = cadherins,
+  only.pos = TRUE
+)
+cadherin.markers.neuron.sig <- cadherin.markers.neuron %>% filter(p_val_adj < 0.01)
+p.sig.neuron <- p.detected.neuron + 
+  geom_point(data = cadherin.markers.neuron.sig, mapping = aes(x = gene, y = cluster), shape = 8) +
+  labs(subtitle = '* FDR < 0.01')
+ggsave(filename = paste0(results_out, 'cadherins-significant_neuron-subtype-dotplot.tiff'), plot = p.sig.neuron, height = 7, width = 9.5, dpi = 320)
+p.sig.neuron
+```
+
+## END
+
+```{r}
+sessionInfo()
+```

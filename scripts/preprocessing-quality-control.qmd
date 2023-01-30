@@ -1,0 +1,473 @@
+---
+title: "Preprocessing and quality control"
+author: "James Choi"
+date: "Last compiled: `r Sys.Date()`"
+format:
+  html:
+    code-fold: false
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    link-external-newwindow: true
+    fig-align: center
+editor: source
+execute: 
+  cache: true
+  warning: false
+  message: false
+project:
+  execute-dir: project
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = 'D:/MiamiProject/Park_snSeq_SuperiorColliculus/')
+```
+
+## Setup
+
+```{r libraries}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(DropletUtils)
+library(reticulate)
+library(patchwork)
+```
+
+```{r directories}
+data_path <- 'data/raw_feature_bc_matrix/'
+results_out <- 'results/preprocessing-quality-control/'
+filtered_counts_out <- 'data/filtered_feature_bc_matrix/'
+qc_filtered_counts_out <- 'data/qc_filtered_feature_bc_matrix/'
+dir.create(path = results_out)
+dir.create(path = filtered_counts_out)
+dir.create(path = qc_filtered_counts_out)
+```
+
+```{r samplesheet}
+samplesheet <- read.csv('data/samplesheet.csv')
+sample_names <- samplesheet$SampleName
+sample_paths <- samplesheet$raw_feature_bc_matrix_path
+time.cols <- c("#dd4539","#d9b123","#68c545","#514fd1")
+```
+
+```{r gather-gene-info}
+feature_info <- rhdf5::h5read(
+  file = sample_paths[1],
+  name = 'matrix/features'
+)
+ensembl_id <- feature_info$id
+gene_name <- feature_info$name
+gene_metadata <- data.frame(
+  'Ensembl_ID' = ensembl_id,
+  'Gene_Name' = gene_name
+)
+genome_ref <- unique(feature_info$genome)
+write.csv(x = gene_metadata, file = paste0('data/', genome_ref, '_gene-metadata.csv'), row.names = FALSE)
+```
+
+
+## Import data
+
+```{r import-raw-counts}
+raw_counts <- vector(mode = 'list', length = length(sample_names))
+names(raw_counts) <- sample_names
+for (i in 1:length(sample_names)) {
+  raw_counts[[i]] <- Read10X_h5(filename = sample_paths[i], use.names = TRUE)
+}
+```
+
+## Cell-calling: distinguishing empty droplets
+
+```{r empty_droplets}
+#| eval: false
+drops_results <- vector(mode = 'list', length = length(sample_names))
+names(drops_results) <- sample_names
+
+for (i in 1:length(sample_names)) {
+  message(paste('Loading data:', sample_names[i]))
+  message('Ranking...')
+  ranks <- DropletUtils::barcodeRanks(
+    m = raw_counts[[i]],
+    lower = 750,
+    fit.bounds = c(1000, 3e5)
+  )
+  message('knee:', ranks@metadata$knee)
+  message('inflection:', ranks@metadata$inflection)
+  message('emptyDrops lower:', 10^(log10(ranks@metadata$inflection)*0.95))
+  # emptydrops
+  message('Running EmptyDrops...')
+  drops <- DropletUtils::emptyDrops(
+    m = raw_counts[[i]],
+    retain = ranks@metadata$knee,
+    lower = 10^(log10(ranks@metadata$inflection)*0.95),
+    BPPARAM = BiocParallel::SnowParam(workers = 3, type = 'SOCK')
+  )
+  # gather
+  df <- cbind(drops, ranks)
+  drops_results[[i]] <- list(
+    drop_df = df,
+    knee = ranks@metadata$knee,
+    inflection = ranks@metadata$inflection
+  )
+}
+saveRDS(drops_results, file = paste0(results_out, 'drops_results.rds'))
+rm(drops, ranks, df)
+```
+
+```{r barcode_rank}
+#| fig.height: 11.5
+#| fig.width: 13.5
+#| fig.caption: Barcode-rank plot for each sample. Red circles denote cell barcodes considered to be actual cells. Black circles denote empty droplets and removed from analysis.
+drops_results <- readRDS(file = paste0(results_out, 'drops_results.rds'))
+rank_plots <- vector(mode = 'list', length = length(drops_results))
+for (i in 1:length(drops_results)) {
+  tmp <- drops_results[[i]]$drop_df[!duplicated(drops_results[[i]]$drop_df),]
+  tmp$keep <- ifelse(
+    test = tmp$FDR < 0.01,
+    yes = 'keep',
+    no = 'discard'
+  )
+  tmp_sub <- paste0('knee (red):', drops_results[[i]]$knee, '\n', 'inflection (blue):', drops_results[[i]]$inflection)
+  rank_plots[[i]] <- ggplot(data = data.frame(tmp)) + 
+    geom_point(mapping = aes(x = rank, y = total, color = keep),
+               alpha = 0.3) + 
+    scale_color_manual(values = c('keep' = 'red', 'discard' = 'black')) +
+    scale_x_log10(breaks = 10^(seq(1,10,1)), labels = scales::comma,
+                  limits = c(1, 10^7)) +
+    scale_y_log10(breaks = 10^(seq(1,10,1)), labels = scales::comma,
+                  limits = c(1, 10^5)) + 
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = paste(sample_names[i], 'barcode-rank'),
+         subtitle = tmp_sub) +
+    xlab(label = 'Rank') + 
+    ylab(label = 'Total UMI') +
+    geom_hline(yintercept = drops_results[[i]]$knee,
+               col = 'indianred', 
+               lty = 'dashed') +
+    geom_hline(yintercept = drops_results[[i]]$inflection,
+               col = 'dodgerblue',
+               lty = 'dashed')
+  # ggsave(filename = paste0(results_out, 'barcode-rank_', names(drops_results)[i], '.tiff'), plot = rank_plots[[i]], height = 3.75, width = 4.25, device = 'tiff')
+}
+rank_plots <- lapply(
+  X = rank_plots,
+  FUN = function(a) a + NoLegend()
+)
+gg <- cowplot::plot_grid(plotlist = rank_plots, ncol = 4, byrow = FALSE)
+ggsave(filename = paste0(results_out, 'emptyDrops-summary.tiff'), plot = gg, device = 'tiff', height = 3.5, width=12, dpi = 320)
+```
+
+Progressively from E19 to P21, the UMI plateau corresponding to non-empty droplets decreases while the UMI plateau corresponding to the empty droplets increases. This indicates a greater proportion of contaminant RNA in E19 than in P21. 
+
+```{r retain_count}
+# Get cell barcodes that pass
+fdr <- 0.05
+retain_bc <- vector(mode = 'list', length = length(drops_results))
+names(retain_bc) <- names(drops_results)
+for (i in 1:length(drops_results)) {
+  tmp <- which(drops_results[[i]]$drop_df$FDR < fdr)
+  retain_bc[[i]] <- rownames(drops_results[[i]]$drop_df)[tmp]
+}
+mean_count <- mean(sapply(retain_bc, length))
+count_diff <- sapply(retain_bc, length) - mean_count
+max_pct_diff <- max(abs(count_diff) / mean_count)
+knitr::kable(x = sapply(retain_bc, length))
+```
+
+```{r filter-barcodes}
+filtered_counts <- vector(mode = 'list', length = length(sample_names))
+names(filtered_counts) <- sample_names
+for (i in 1:length(sample_names)) {
+  filtered_counts[[i]] <- raw_counts[[i]][, retain_bc[[i]]]
+}
+# for (i in 1:length(sample_names)) {
+#   saveRDS(filtered_counts[[i]],
+#           file = paste0(filtered_counts_out, sample_names[i], '_filtered_feature_bc_matrix.rds'))
+# }
+```
+
+## Gene-level QC
+
+```{r}
+# filtered_counts <- vector(mode = 'list', length = length(sample_names))
+# names(filtered_counts) <- sample_names
+# for (i in 1:length(sample_names)) {
+#   filtered_counts[[i]] <- readRDS(file = paste0(filtered_counts_out, sample_names[i], '_filtered_feature_bc_matrix.rds'))
+# }
+```
+
+```{r qc_compute, warning=FALSE, message=FALSE}
+# Compute QC metrics
+for (i in 1:length(filtered_counts)) {
+  filtered_counts[[i]] <- CreateSeuratObject(
+    counts = filtered_counts[[i]],
+    project = sample_names[i]
+  )
+  filtered_counts[[i]] <- PercentageFeatureSet(
+    object = filtered_counts[[i]],
+    pattern = '^mt-',
+    col.name = 'percent_mt'
+  )
+  # Not used for QC
+  filtered_counts[[i]] <- PercentageFeatureSet(
+    object = filtered_counts[[i]],
+    pattern = '^Rp[ls]',
+    col.name = 'percent_rp'
+  )
+  filtered_counts[[i]]$log_nUMI <- log10(filtered_counts[[i]]$nCount_RNA)
+}
+```
+
+```{r qc_metrics}
+#| fig.height: 2.5
+#| fig.width: 6
+#| fig.cap: Violin plot of various quality control metrics (pre-filter)
+# Extract and plot data
+meta_feats <- c('orig.ident','log_nUMI','nFeature_RNA','percent_mt')
+metadata <- lapply(
+  X = filtered_counts,
+  FUN = function(x) {
+    x@meta.data[meta_feats]
+  }
+)
+metadata <- Reduce(rbind, metadata)
+p.metadata <- metadata %>%
+  reshape2::melt(id.vars = c('orig.ident')) %>%
+  ggplot(mapping = aes(x = orig.ident, y = value)) + 
+  geom_violin(mapping = aes(fill = orig.ident), scale = 'width') +
+  facet_wrap(variable ~ ., scales = 'free_y', ncol = 3) +
+  theme_bw() +
+  xlab(label = 'Sample ID') +
+  ylab(label = 'Value') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = guide_legend(title = 'Sample ID'))
+ggsave(filename = paste0(results_out, 'qualityControlMetrics_unfiltered.tiff'),
+       plot = p.metadata, height = 2.5, width = 6.5)
+p.metadata
+```
+
+Since we already applied a UMI count threshold during the barcode-rank cell calls, I considered whether it was necessary to do any sort of UMI count-based filtering i.e. deviation-based filtering. How many cells are removed due to setting a minimum of 3 MADs from median total UMI? 
+
+Comparing with and without thresholds for each sample, approximately 90 additional cells are removed. This is relatively few cells, so I have more confidence in applying an additional total UMI filter to remove low quality cells that could potentially drive clustering results downstream.
+
+
+```{r qc-count}
+mt_threshold <- 5
+
+get_mad_lim <- function(x, dev = 3) {
+  return(median(x) + dev * mad(x, constant = 1))
+}
+high_qc <- vector(mode = 'list', length = length(filtered_counts))
+names(high_qc) <- names(filtered_counts)
+for (i in 1:length(filtered_counts)) {
+  umi_mad_min <- get_mad_lim(filtered_counts[[i]]$log_nUMI, dev = -3)
+  feature_mad_min <- get_mad_lim(filtered_counts[[i]]$nFeature_RNA, dev = -3)
+  high_qc[[i]] <- filtered_counts[[i]]@meta.data$log_nUMI >= umi_mad_min &
+    filtered_counts[[i]]@meta.data$nFeature_RNA >= feature_mad_min &
+    filtered_counts[[i]]@meta.data$percent_mt <= mt_threshold
+  names(high_qc[[i]]) <- rownames(filtered_counts[[i]]@meta.data)
+}
+knitr::kable(
+  x = t(sapply(high_qc, table)),
+  caption = "How many cells are good quality?"
+)
+```
+
+
+## Doublet removal
+
+```{r doublet_detection}
+doublet_rate <- read.table(file = 'ref/DoubletRates_10x.tsv', header = TRUE)
+doublet_rate <- lm(Multiplet_rate ~ nCells_Recovered, data = doublet_rate)
+compute_rate <- function(x) {
+  return(doublet_rate$coefficients[1] + doublet_rate$coefficients[2] * x)
+}
+
+# Import package and std_out config details.
+scrublet_out <- paste0(results_out, 'scrublet_outs/')
+dir.create(path = scrublet_out)
+scrub <- import(module = 'scrublet', convert = FALSE)
+
+# Run Scrublet 
+doublet_results <- vector(mode = 'list', length = length(filtered_counts))
+names(doublet_results) <- names(filtered_counts)
+for (id in names(filtered_counts)) {
+  message('running Scrublet on: ', id)
+  tmp_rate <- compute_rate(x = ncol(filtered_counts[[id]]))
+  tmp_scrublet <- scrub$Scrublet(
+    counts_matrix = r_to_py(
+      x = Matrix::t(filtered_counts[[id]][['RNA']]@counts))$tocsc(),
+    expected_doublet_rate = tmp_rate
+  )
+  scrublet_result <- py_capture_output(
+    tmp_scrublet$scrub_doublets(
+      min_counts = 2,
+      min_cells = 3,
+      min_gene_variability_pctl = 85,
+      verbose = TRUE
+    )
+  )
+  tmp_scrublet$call_doublets(threshold = 0.1)
+  writeLines(
+    text = c(id, scrublet_result),
+    con = paste0(results_out, 'scrublet_outs/', id, '.txt')
+  )
+  scores <- py_to_r(tmp_scrublet$doublet_scores_obs_)
+  threshold <- py_to_r(tmp_scrublet$threshold_)
+  doublet_results[[id]][['doublet_score']] <-
+    py_to_r(tmp_scrublet$doublet_scores_obs_)
+  doublet_results[[id]][['is_doublet']] <- 
+    doublet_results[[id]][['doublet_score']] > py_to_r(tmp_scrublet$threshold_)
+  names(doublet_results[[id]]) <- c('doublet_score', 'is_doublet')
+  doublet_results[[id]][['Threshold_score']] <- py_to_r(tmp_scrublet$threshold_)
+  gc()
+}
+```
+
+```{r doublet_results}
+#| fig.height: 2.5
+#| fig.width: 10
+#| fig.cap: Distribution of doublet scores. Higher scores indicate greater likelihood of doublet. Red line indicates threshold for labeling doublets.
+p.doublet <- vector(mode = 'list', length = length(doublet_results))
+names(p.doublet) <- names(doublet_results)
+for (id in names(doublet_results)) {
+  p.doublet[[id]] <- data.frame('score'=doublet_results[[id]]$doublet_score) %>%
+    ggplot(mapping = aes(x = score)) +
+    geom_histogram(mapping = aes(x = score), binwidth = 0.01) + 
+    geom_vline(xintercept = doublet_results[[id]]$Threshold_score,
+               linetype = 'dashed', col = 'indianred', linewidth = 1) + 
+    scale_y_continuous(trans = 'log10', breaks = 10^seq(-5, 5, 1)) + 
+    labs(title = paste('Scrublet result:', id)) + 
+    ylab(label = 'Cell count') +  
+    xlab(label = 'Doublet score') + 
+    theme_bw() + 
+    theme(title = element_text(size = 8))
+}
+p.doublet <- cowplot::plot_grid(plotlist = p.doublet, ncol = 4, byrow = FALSE)
+ggsave(filename = paste0(scrublet_out, 'score_hist.tiff'),
+       plot = p.doublet, height = 2.5, width = 10, device = 'tiff')
+p.doublet
+```
+
+```{r doublet_summary}
+# Summary of doublet call results
+knitr::kable(x = t(sapply(doublet_results, 
+                          FUN = function(x) table(x[['is_doublet']]))),
+             caption = 'Scrublet summary: is doublet?')
+```
+
+```{r filter_cells}
+good_cells <- vector(mode = 'list', length = length(filtered_counts))
+names(good_cells) <- sample_names
+for (i in 1:length(filtered_counts)) {
+  good_cells[[i]] <- which(high_qc[[i]] & !doublet_results[[i]]$is_doublet)
+}
+
+# Summary table
+filter_results <- cbind(
+  'Before' = sapply(filtered_counts, ncol),
+  'Filtered' = sapply(good_cells, length)
+)
+knitr::kable(x = filter_results, caption = 'Number of cells retained after QC 
+             and doublet detection.')
+
+# Filter cells
+for (i in 1:length(sample_names)) {
+  filtered_counts[[i]] <- filtered_counts[[i]][, good_cells[[i]]]
+}
+for (i in 1:length(filtered_counts)) {
+  saveRDS(filtered_counts[[i]][['RNA']]@counts, 
+          file = paste0(qc_filtered_counts_out, names(filtered_counts)[i], '.rds'))
+}
+```
+
+## Quality metrics summary
+
+```{r}
+filtered_counts <- vector('list', 4)
+names(filtered_counts) <- samplesheet$SampleName
+for (i in 1:length(filtered_counts)) {
+  tmp <- readRDS(file = paste0(qc_filtered_counts_out, samplesheet$SampleName[i], '.rds'))
+  filtered_counts[[i]] <- CreateSeuratObject(
+    counts = tmp,
+    project = samplesheet$SampleName[i]
+  )
+}
+filtered_counts <- lapply(
+  X = filtered_counts,
+  FUN = PercentageFeatureSet,
+  col.name = 'percent_mt',
+  pattern = '^mt-'
+)
+```
+
+```{r qc_metrics_filtered}
+#| fig.height: 2.5
+#| fig.width: 6
+#| fig.cap: Violin plot of various quality control metrics (pre-filter)
+# Extract and plot data
+meta_feats <- c('orig.ident','nCount_RNA','nFeature_RNA','percent_mt')
+metadata <- lapply(
+  X = filtered_counts,
+  FUN = function(x) {
+    x@meta.data[meta_feats]
+  }
+)
+metadata <- Reduce(rbind, metadata)
+p.ncount <- metadata %>% 
+  ggplot(mapping = aes(x = orig.ident, y = nCount_RNA)) + 
+  geom_violin(mapping = aes(fill = orig.ident), scale = 'width') +
+  scale_y_continuous(trans = 'log10',
+                     labels = scales::label_number_si()) +
+  scale_fill_manual(values = time.cols) + 
+  theme_bw() +
+  # xlab(label = 'Sample ID') +
+  ylab(label = '# UMI detected') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        legend.text = element_text(size = 12)) +
+  guides(fill = guide_legend(title = 'Sample ID'))
+p.nfeature <- metadata %>% 
+  ggplot(mapping = aes(x = orig.ident, y = nFeature_RNA)) + 
+  geom_violin(mapping = aes(fill = orig.ident), scale = 'width') +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  scale_fill_manual(values = time.cols) + 
+  theme_bw() +
+  # xlab(label = 'Sample ID') +
+  ylab(label = '# genes detected') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        legend.text = element_text(size = 12)) +
+  guides(fill = guide_legend(title = 'Sample ID'))
+p.percent_mt <- metadata %>% 
+  ggplot(mapping = aes(x = orig.ident, y = percent_mt)) + 
+  geom_violin(mapping = aes(fill = orig.ident), scale = 'width') +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  scale_fill_manual(values = time.cols) + 
+  theme_bw() +
+  # xlab(label = 'Sample ID') +
+  ylab(label = '% mitochondrial reads') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_blank(),
+        legend.text = element_text(size = 12)) +
+  guides(fill = guide_legend(title = 'Sample ID'))
+p.metadata <- (p.ncount | p.nfeature | p.percent_mt) + plot_layout(guides = 'collect')
+ggsave(filename = paste0(results_out, 'qualityControlMetrics_filtered.tiff'), plot = p.metadata, height = 2, width = 6.5)
+p.metadata
+```
+
+```{r}
+
+```
+
+
+```{r fin}
+rm(list = ls())
+gc(verbose=FALSE)
+sessionInfo()
+```

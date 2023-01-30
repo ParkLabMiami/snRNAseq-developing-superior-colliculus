@@ -1,0 +1,2316 @@
+---
+title: "Cell type-specific trascriptioal chages over time"
+author: "James Choi"
+date: "Last compiled: `r Sys.Date()`"
+format:
+  html:
+    code-fold: false
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    link-external-newwindow: true
+    fig-align: center
+editor: source
+execute: 
+  cache: false
+  warning: false
+  message: false
+project:
+  execute-dir: project
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = 'D:/MiamiProject/Park_snSeq_SuperiorColliculus/')
+```
+
+## Setup
+
+```{r libraries}
+library(patchwork)
+library(topGO)
+library(org.Mm.eg.db)
+library(scran)
+library(scuttle)
+library(DESeq2)
+library(DropletUtils)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(enrichR)
+library(simplifyEnrichment)
+library(tidyr)
+# library(fgsea)
+# library(msigdbr)
+```
+
+```{r}
+standardize_values = function(x) {
+  InfPos = which(is.infinite(x))
+  nonInfPos = which(!is.infinite(x))
+  y = x[!is.infinite(x)]
+  z = (y - min(y, na.rm = TRUE))/(max(y, na.rm = TRUE) - min(y, na.rm = TRUE))
+  k = rep(0, length(x))
+  k[InfPos] = 1
+  k[nonInfPos] = y
+  return(k)
+}
+shuffle_rows <- function(df) {
+  df[sample(1:nrow(df), size = nrow(df), replace = FALSE),]
+}
+str_wrap_factor <- function(x, ...) {
+  levels(x) <- stringr::str_wrap(levels(x), ...)
+  return(x)
+}
+isTopN = function(x, n) {
+  # rank goes lowest numerical rank to highest by smallest to largest value
+  y = order(-x, decreasing = FALSE, na.last = TRUE)
+  z = rep(FALSE, length(x))
+  z[y[1:n]] = TRUE
+  return(z)
+}
+time.cols <- c("#dd4539","#d9b123","#68c545","#514fd1")
+celltype.cols <- RColorBrewer::brewer.pal(n = 12, name = 'Paired')
+celltype.cols[11] <- 'gold'
+neuron.cols <- c("#c2444c","#e14327","#be6231","#de8d26","#debc22","#b99f3e","#a6c336","#6f9a3e","#63d135","#59c251","#4db873","#36dbbc","#7b85dc","#6074eb","#554ea8","#6934c4","#9253ea","#542298","#ac69d3","#ce4ce2","#d980cc","#cc4bb5","#df35bd","#92337c","#d54681")
+umap.axes <- ggplot(data.frame(x=10,y=10),aes(x=x,y,y)) +
+  geom_point() +
+  xlim(c(0,1)) + ylim(c(0,1)) +
+  theme_classic() +
+  xlab('UMAP 1') + ylab('UMAP 2') +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_text(size = 10),
+        axis.line = element_line(
+          color = 'black',
+          arrow = arrow(angle = 15, length = unit(.35, 'cm'), type = 'closed')
+        ),
+        panel.background = element_rect(fill = 'transparent', color = NA),
+        panel.border = element_rect(fill = 'transparent', color = NA)
+  )
+layout <- c(
+  patchwork::area(t = 11, l = 1, b = 11, r = 1),
+  patchwork::area(t = 1, l = 1, b = 11, r = 11)
+)
+```
+
+```{r samplesheet}
+samplesheet <- read.csv(file = 'data/samplesheet.csv')
+sample_names <- samplesheet$SampleName
+```
+
+```{r directories}
+results_out <- 'results/development-differential-expression/'
+goResults_out <- 'results/development-differential-expression/GO-analysis/'
+dir.create(path = results_out)
+dir.create(path = goResults_out)
+```
+
+```{r load-data}
+sc <- readRDS(file = 'data/sc.rds')
+neuron <- readRDS(file = 'data/neuron.rds')
+```
+
+## Overview of superior colliculus cell-types
+
+```{r}
+#| fig.height: 4
+#| fig.width: 8.25
+Idents(sc) <- 'celltype'
+Idents(neuron) <- 'subtype'
+p.celltype = DimPlot(sc, label = TRUE, label.size = 4) + 
+  theme_void() +
+  NoLegend() + 
+  scale_color_manual(values = celltype.cols)
+p.celltype = umap.axes + p.celltype + plot_layout(design = layout)
+p.neuron.subtype = DimPlot(neuron, label = TRUE, label.size = 4) +
+  theme_void() + 
+  NoLegend() +
+  scale_color_manual(values = neuron.cols)
+p.neuron.subtype = umap.axes + p.neuron.subtype + plot_layout(design = layout)
+p.celltype | p.neuron.subtype
+```
+
+### Cell-type counts across development
+
+It is important to consider cell counts because the power of differential expression testing depends on them.
+
+```{r}
+#| fig.height: 3
+#| fig.width: 9
+p.cellcounts = table('Celltype' = sc$celltype,
+                     'time' = sc$time) %>%
+  as.data.frame() %>% 
+  mutate(Celltype = str_wrap_factor(Celltype, width = 15)) %>% 
+  ggplot() + 
+  geom_bar(mapping = aes(x = time, y = Freq, fill = Celltype),
+           stat = 'identity', color = 'black') + 
+  facet_wrap(. ~ Celltype, scales = 'free_y', nrow = 2) +
+  scale_fill_manual(values = celltype.cols) +
+  labs(label = 'Cell-type counts') +
+  theme_bw() + 
+  theme(legend.position = 'none',
+        axis.title = element_blank())
+ggsave(filename = paste0(results_out, 'celltype-counts.tiff'), plot = p.cellcounts, device = 'tiff', height = 3.75, width = 7.5, dpi = 320)
+p.cellcounts
+```
+
+We see that Dividing Cells, Microglia, Endothelial Cells, and Epithelial Cells have an average count of less than 50 cells per sample. This will reduce the power of DE tests. 
+
+## Differential expression testing
+
+### Compute cell-type DEG across time
+
+```{r prep-deg}
+Idents(sc) <- 'celltype'
+DefaultAssay(sc) <- 'RNA'
+comparison.pairs <- expand.grid(levels(sc$time), levels(sc$time))
+comparison.pairs = comparison.pairs[comparison.pairs$Var1 != comparison.pairs$Var2,]
+comparison.pairs = apply(comparison.pairs, 2, as.character)
+celltypes <- levels(sc$celltype)
+```
+
+#### Compare pairwise across time
+
+```{r compute-deg}
+deg <- vector(mode = 'list', length = length(celltypes))
+names(deg) <- celltypes
+for (ct in celltypes) {
+  print(ct)
+  deg[[ct]] <- vector(mode = 'list', length = nrow(comparison.pairs))
+  names(deg[[ct]]) <- apply(comparison.pairs, 1, paste, collapse = '_')
+  for (i in 1:nrow(comparison.pairs)) {
+    print(comparison.pairs[i,])
+    deg[[ct]][[i]] <- FindMarkers(
+      object = sc,
+      subset.ident = ct,
+      group.by = 'time',
+      ident.1 = comparison.pairs[i, 1],
+      ident.2 = comparison.pairs[i, 2],
+      logfc.threshold = 0.25,
+      assay = 'RNA',
+      slot = 'data',
+      test.use = 'wilcox'
+    )
+    deg[[ct]][[i]]$gene <- rownames(deg[[ct]][[i]])
+  }
+}
+```
+
+```{r save-deg}
+saveRDS(deg, file = paste0(results_out, 'celltype-time-pairwise-deg.rds'))
+dir.create(path = paste0(results_out, 'celltype-time-pairwise-deg/'))
+for (i in 1:length(deg)) {
+  for (j in 1:length(deg[[i]])) {
+    write.csv(x = deg[[i]][[j]], file = gsub(pattern = ' ', replacement = '', x = paste0(results_out, 'celltype-time-pairwise-deg/', names(deg)[i], '-', names(deg[[i]])[j], '.csv')))
+  }
+}
+```
+
+```{r load-deg}
+deg <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg.rds'))
+```
+
+#### Compare globally enriched per time-point
+
+```{r compute-global-deg}
+DefaultAssay(sc) <- 'RNA'
+Idents(sc) <- 'time'
+celltypes <- levels(sc$celltype)
+time.deg <- list()
+for (c in celltypes) {
+  time.deg[[c]] <- FindAllMarkers(
+    object = sc[, sc$celltype == c],
+    assay = 'RNA',
+    slot = 'data',
+    logfc.threshold = 0.25,
+    only.pos = TRUE
+  )
+}
+```
+
+```{r save-global-deg}
+saveRDS(time.deg, file = paste0(results_out, 'celltype-time-global-deg.rds'))
+dir.create(path = paste0(results_out, 'celltype-time-global-deg/'))
+for (i in 1:length(time.deg)) {
+  write.csv(x = time.deg[[i]], file = paste0(results_out, 'celltype-time-global-deg/', gsub(' ', '', names(time.deg)[i]), '.csv'))
+}
+```
+
+```{r load-global-deg}
+time.deg <- readRDS(file = paste0(results_out, 'celltype-time-global-deg.rds'))
+```
+
+### Compute pan-neuronal DEG across time
+
+#### Compare pairwise across time
+
+Are there any DEGs between time-points that are shared both by excitatory and inhibitory neurons?
+
+```{r compute-neuron-deg-pairwise}
+DefaultAssay(neuron) <- 'RNA'
+Idents(neuron) <- 'time'
+neuron.deg <- list()
+for (i in 1:nrow(comparison.pairs)) {
+  print(comparison.pairs[i,])
+  neuron.deg[[i]] <- FindMarkers(
+    object = neuron, 
+    ident.1 = comparison.pairs[i, 1],
+    ident.2 = comparison.pairs[i, 2],
+    logfc.threshold = 0.25,
+    assay = 'RNA',
+    slot = 'data',
+    test.use = 'wilcox'
+  )
+  neuron.deg[[i]]$gene <- rownames(neuron.deg[[i]])
+}
+names(neuron.deg) <- apply(comparison.pairs, 1, paste, collapse = '_')
+```
+
+```{r save-neuron-deg-pairwise}
+saveRDS(neuron.deg, file = paste0(results_out, 'all-neuron-time-pairwise-deg.rds'))
+dir.create(path = paste0(results_out, 'all-neuron-time-pairwise-deg/'))
+for (i in 1:length(neuron.deg)) {
+  write.csv(
+    x = neuron.deg[[i]],
+    file = paste0(results_out, 'all-neuron-time-pairwise-deg/', names(neuron.deg)[i], '.csv')
+  )
+}
+```
+
+```{r load-neuron-deg-pairwise}
+neuron.deg <- readRDS(file = paste0(results_out, 'all-neuron-time-pairwise-deg.rds'))
+```
+
+#### Compare globally enriched per time-point
+
+```{r compute-neuron-deg-globally}
+DefaultAssay(neuron) <- 'RNA'
+Idents(neuron) <- 'time'
+timepoints <- levels(neuron$time)
+neuron.time.deg <- FindAllMarkers(
+  neuron,
+  logfc.threshold = 0.25,
+  assay = 'RNA',
+  slot = 'data',
+  test.use = 'wilcox'
+)
+```
+
+```{r save-neuron-deg-globally}
+saveRDS(neuron.time.deg, file = paste0(results_out, 'all-neuron-time-global-deg.rds'))
+dir.create(path = paste0(results_out, 'all-neuron-time-global-deg/'))
+write.csv(x = neuron.time.deg, file = paste0(results_out, 'all-neuron-time-global-deg.csv'))
+```
+
+```{r load-neuron-deg-globally}
+neuron.time.deg <- readRDS(file = paste0(results_out, 'all-neuron-time-global-deg.rds'))
+```
+
+
+## Accounting for ambient RNA contamination
+
+```{r load-data}
+deg <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg.rds'))
+time.deg <- readRDS(file = paste0(results_out, 'celltype-time-global-deg.rds'))
+neuron.deg <- readRDS(file = paste0(results_out, 'all-neuron-time-pairwise-deg.rds'))
+neuron.time.deg <- readRDS(file = paste0(results_out, 'all-neuron-time-global-deg.rds'))
+```
+
+
+```{r load-data}
+Idents(sc) <- 'celltype'
+raw.counts <- vector(mode = 'list', length = length(samplesheet$raw_feature_bc_matrix_path))
+names(raw.counts) <- samplesheet$SampleName
+for (i in seq_along(samplesheet$raw_feature_bc_matrix_path)) {
+  raw.counts[[i]] <- Read10X_h5(filename = samplesheet$raw_feature_bc_matrix_path[i])
+}
+```
+
+
+### Inspecting ambient effects
+
+```{r}
+head(deg$`Excitatory Neuron`$E19_P4)
+```
+
+```{r}
+head(deg$`Inhibitory Neuron`$E19_P4)
+```
+
+```{r}
+head(deg$`Inhibitory Neuron`$P8_P21)
+```
+
+DE test of ex neurons across time-points shows many genes that are not specific to ex neurons. Many of these genes are potentially due to ambient RNA contamination since their expression is detected in multiple cell-types e.g. Ttr, Plp1.
+
+### Estimate ambient profile
+
+The majority of droplets in the 10X output `unfiltered_feature_bc_matrix` do not contain nuclei. The barcode-rank plots from `preprocessing-quality-control.qmd` script shows that a large percentage of drops between ranks 1000-10000 have non-zero total UMI counts. These droplets are likely empty droplets containing contaminant, ambient RNAs.
+
+The following code chunk is modified from `barcodeRanks.R` from the `DropletUtils` R package. The primary modification is an additional argument for inverting the barcode ranks such that the computed spline fit curvature and inferred knee point are determined for the point along the curve with the most positive curvature i.e. most upwards curvature, whereas the as-is `barcodeRanks.R` implementation only allows for identifying the knee point with most negative curvature i.e. point where steepest drop-off in UMI count occurs.
+
+<!-- ```{r} -->
+<!-- new.barcodeRanks <- function(m, lower=100, fit.bounds=NULL, exclude.from=50, df=20, ..., BPPARAM=SerialParam(), invert = FALSE) { -->
+<!--     # old <- .parallelize(BPPARAM) -->
+<!--     # on.exit(setAutoBPPARAM(old)) -->
+
+<!--     totals <- unname(sparseMatrixStats::colSums2(m)) -->
+<!--     o <- order(totals, decreasing=TRUE) -->
+
+<!--     stuff <- rle(totals[o]) -->
+<!--     run.rank <- cumsum(stuff$lengths) - (stuff$lengths-1)/2 # Get mid-rank of each run. -->
+<!--     run.totals <- stuff$values -->
+
+<!--     keep <- run.totals > lower -->
+<!--     if (sum(keep)<3) {  -->
+<!--         stop("insufficient unique points for computing knee/inflection points") -->
+<!--     }  -->
+<!--     y <- log10(run.totals[keep]) -->
+<!--     x <- log10(run.rank[keep]) -->
+
+<!--     # Numerical differentiation to identify bounds for spline fitting. -->
+<!--     edge.out <- .find_curve_bounds(x=x, y=y, exclude.from=exclude.from) -->
+<!--     left.edge <- edge.out["left"] -->
+<!--     right.edge <- edge.out["right"] -->
+<!--     # As an aside: taking the right edge to get the total for the inflection point. -->
+<!--     # We use the numerical derivative as the spline is optimized for the knee. -->
+<!--     inflection <- 10^(y[right.edge]) -->
+
+<!--     # We restrict curve fitting to this region, thereby simplifying the shape of the curve. -->
+<!--     # This allows us to get a decent fit with low df for stable differentiation. -->
+<!--     if (is.null(fit.bounds)) { -->
+<!--         new.keep <- left.edge:right.edge -->
+<!--     } else { -->
+<!--         new.keep <- y > log10(fit.bounds[1]) & y < log10(fit.bounds[2]) -->
+<!--     } -->
+
+<!--     # Smoothing to avoid error multiplication upon differentiation. -->
+<!--     # Minimizing the signed curvature and returning the total for the knee point. -->
+<!--     fitted.vals <- rep(NA_real_, length(keep)) -->
+
+<!--     if (length(new.keep) >= 4) { -->
+<!--         fit <- smooth.spline(x[new.keep], y[new.keep], df=df, ...) -->
+<!--         fitted.vals[keep][new.keep] <- 10^fitted(fit) -->
+
+<!--         d1 <- predict(fit, deriv=1)$y -->
+<!--         d2 <- predict(fit, deriv=2)$y -->
+<!--         curvature <- d2/(1 + d1^2)^1.5 -->
+<!--         if (invert) { -->
+<!--           knee = 10^(y[new.keep][which.max(curvature)]) -->
+<!--         } else { -->
+<!--           knee <- 10^(y[new.keep][which.min(curvature)]) -->
+<!--         } -->
+<!--     } else { -->
+<!--         # Sane fallback upon overly aggressive filtering by 'exclude.from', 'lower'. -->
+<!--         knee <- 10^(y[new.keep[1]])  -->
+<!--     } -->
+
+<!--     # Returning a whole stack of useful stats. -->
+<!--     out <- DataFrame( -->
+<!--         rank=.reorder(run.rank, stuff$lengths, o),  -->
+<!--         total=.reorder(run.totals, stuff$lengths, o), -->
+<!--         fitted=.reorder(fitted.vals, stuff$lengths, o) -->
+<!--     ) -->
+<!--     rownames(out) <- colnames(m) -->
+<!--     metadata(out) <- list(knee=knee, inflection=inflection) -->
+<!--     out -->
+<!-- } -->
+
+<!-- .reorder <- function(vals, lens, o) { -->
+<!--     out <- rep(vals, lens) -->
+<!--     out[o] <- out -->
+<!--     return(out) -->
+<!-- } -->
+
+<!-- .find_curve_bounds <- function(x, y, exclude.from)  -->
+<!-- # The upper/lower bounds are defined at the plateau and inflection, respectively. -->
+<!-- # Some exclusion of the LHS points avoids problems with discreteness. -->
+<!-- { -->
+<!--     d1n <- diff(y)/diff(x) -->
+
+<!--     skip <- min(length(d1n) - 1, sum(x <= log10(exclude.from))) -->
+<!--     d1n <- tail(d1n, length(d1n) - skip) -->
+
+<!--     right.edge <- which.min(d1n) -->
+<!--     left.edge <- which.max(d1n[seq_len(right.edge)]) -->
+
+<!--     c(left=left.edge, right=right.edge) + skip -->
+<!-- } -->
+<!-- ``` -->
+
+```{r estimate-ambient-profile}
+# inflection <- c(E19 = 2627, P4 = 2875, P8 = 2335, P21 = 1889)
+# knee = c(5022, 2875, 2335, 1889)
+rankPlots = vector(mode = 'list', length = length(raw.counts))
+names(rankPlots) = names(raw.counts)
+empty.threshold <- c()
+for (i in seq_along(raw.counts)) {
+  # Identify second "knee" point in barcode ranks as these denote probable empty droplets.
+  bcrank <- barcodeRanks(
+    m = raw.counts[[i]],
+    lower = 300,
+    fit.bounds = c(300, 2000),
+  )
+  lowKnee = bcrank@metadata$knee
+  # bcrank = new.barcodeRanks(
+  #   m = raw.counts[[i]],
+  #   lower = 300, 
+  #   fit.bounds = c(lowKnee, 4000),
+  #   invert = TRUE
+  # )
+  # 1.1 as of 2023-01-16
+  # empty.threshold[i] <- 10^(log10(bcrank@metadata$knee) * 1.1)
+  # empty.threshold[i] <- bcrank@metadata$knee
+  empty.threshold[i] <- lowKnee
+  tmp = bcrank %>%
+    as.data.frame() %>%
+    filter(!is.na(fitted)) %>%
+    filter(!duplicated(rank))
+  knee = 10^(log10(bcrank@metadata$knee))
+  knee = lowKnee
+  maxRank = max(tmp$rank)
+  rankPlots[[i]] = tmp %>%
+    ggplot() +
+    geom_point(mapping = aes(x = rank, y = total)) +
+    labs(title = names(raw.counts)[i]) +
+    scale_x_continuous(trans = 'log10') +
+    scale_y_continuous(trans = 'log10') +
+    theme_bw()
+  rankPlots[[i]] = rankPlots[[i]] + 
+    geom_hline(yintercept = knee) +
+    geom_text(data = data.frame(rank = maxRank, 
+                                total = knee, 
+                                label = paste('knee:', knee)),
+              mapping = aes(x = rank, y = total, label = label),
+              hjust = 1,
+              vjust = 0
+    )
+}
+# Code chunk to visualize knee-points for identifying empty droplets
+ambientCutoff = cowplot::plot_grid(plotlist = rankPlots)
+ggsave(filename = paste0(results_out, 'ambient-rna-cutoff-barcode-rank.tiff'), plot = ambientCutoff, device = 'tiff', height = 5, width = 5.5, dpi = 320)
+ambientCutoff
+# Chunk got estimating ambient profile
+ambient <- vector(mode = 'list', length = length(raw.counts))
+names(ambient) <- samplesheet$SampleName
+for (i in seq_along(raw.counts)) {
+  ambient[[i]] <- ambientProfileEmpty(
+    m = raw.counts[[i]],
+    lower = empty.threshold[i],
+    good.turing = FALSE,
+    round = TRUE
+  )
+}
+ambient <- Reduce(f = cbind, x = ambient)
+colnames(ambient) <- samplesheet$SampleName
+```
+
+#### Barcode rank plot with annotated thresholds
+
+```{r}
+drops_results = readRDS('results/preprocessing-quality-control/drops_results.rds')
+emptyDropKnee = c()
+for (i in seq_along(raw.counts)) {
+  bcrank = barcodeRanks(
+    m = raw.counts[[i]],
+    lower = 300,
+    fit.bounds = c(300, 2000)
+  )
+  emptyDropKnee[i] = bcrank@metadata$knee
+}
+# prep rank dataframe
+rankData = vector(mode = 'list', length = length(raw.counts))
+names(rankData) = names(raw.counts)
+goodLabel = vector(mode = 'list', length = length(raw.counts))
+names(goodLabel) = names(raw.counts)
+emptyLabel = vector(mode = 'list', length = length(raw.counts))
+names(emptyLabel) = names(raw.counts)
+if (!identical(names(drops_results), names(raw.counts))) {
+  stop('order of samples in `drops_results` and `raw.counts` not identical')
+} else {
+  for (i in seq_along(drops_results)) {
+    tmpRank = as.data.frame(drops_results[[i]]$drop_df)
+    rankData[[i]] = tmpRank[!duplicated(tmpRank),] %>% 
+      mutate(
+        DropletClass = case_when(
+          FDR < 0.01 | Total > drops_results[[i]]$knee ~ 'Good nucleus',
+          Total < emptyDropKnee[i] ~ 'Empty droplet',
+          is.na(FDR) | FDR >= 0.01 ~ 'Bad nucleus'
+        ),
+        time = names(drops_results)[i]
+      )
+    rankIsNucleus = tmpRank$rank[max(which((tmpRank$Total > drops_results[[i]]$knee) == 0))]
+    rankIsEmpty = tmpRank$rank[max(which((tmpRank$Total < emptyDropKnee[i]) == 1))]
+    goodLabel[[i]] = data.frame(
+      x = rankIsNucleus,
+      y = drops_results[[i]]$knee,
+      label = paste('Good nucleus\nthreshold:', drops_results[[i]]$knee),
+      time = names(drops_results)[i]
+    )
+    emptyLabel[[i]] = data.frame(
+      x = rankIsEmpty,
+      y = emptyDropKnee[i],
+      label = paste('Empty droplet\nthreshold:', emptyDropKnee[i]),
+      time = names(drops_results)[i]
+    )
+  }
+}
+rm(tmpRank, rankIsNucleus, rankIsEmpty)
+rankDataCombined = Reduce(f = rbind, x = rankData)
+goodLabelCombined = Reduce(f = rbind, x = goodLabel)
+emptyLabelCombined = Reduce(f = rbind, x = emptyLabel)
+
+rankPlot = rankDataCombined %>% 
+  mutate(time = factor(time, levels = levels(sc$time))) %>% 
+  ggplot(mapping = aes(x = rank, y = Total)) +
+  geom_point(mapping = aes(color = DropletClass), alpha = 0.3) +
+  # geom_hline(
+  #   data = goodLabelCombined,
+  #   mapping = aes(yintercept = y, color = label),
+  #   lty = 'dashed',
+  #   linewidth = 0.5,
+  #   color = 'red'
+  # ) +
+  geom_hline(
+    data = emptyLabelCombined,
+    mapping = aes(yintercept = y, color = label),
+    lty = 'dashed',
+    linewidth = 0.5,
+    color = 'dodgerblue'
+  ) +
+  # geom_text(
+  #   data = goodLabelCombined,
+  #   mapping = aes(x = 1, y = y, label = label),
+  #   size = 4,
+  #   hjust = 0,
+  # ) +
+  geom_text(
+    data = emptyLabelCombined,
+    mapping = aes(x = 1, y = y, label = label),
+    size = 4,
+    hjust = 0,
+  ) +
+  facet_wrap(. ~ time, ncol = 2) +
+  scale_x_log10(breaks = 10^(seq(1,10,1)), labels = scales::comma,
+                limits = c(1, 10^7)) +
+  scale_y_log10(breaks = 10^(seq(1,10,1)), labels = scales::comma,
+                limits = c(1, 10^5)) + 
+  scale_color_manual(values = c('Good nucleus' = 'red', 
+                                'Bad nucleus' = 'dodgerblue', 
+                                'Empty droplet' = 'black')) +
+  xlab(label = 'Rank') + 
+  ylab(label = 'Total UMI') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        strip.text = element_text(size = 14),
+        legend.text = element_text(size = 12),
+        legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(alpha = 1)))
+ggsave(filename = paste0(results_out, 'barcode-rank-summary.tiff'), plot = rankPlot, height = 6.5, width = 8, dpi = 320, device = 'tiff')
+rankPlot
+```
+
+```{r aggregate-pseudobulk}
+sc_sce <- SingleCellExperiment(
+  assays = list(counts = sc[['RNA']]@counts)
+)
+colData(sc_sce) <- cbind(colData(sc_sce), sc@meta.data)
+sc_summed <- aggregateAcrossCells(
+  x = sc_sce,
+  ids = paste(sc_sce$celltype, sc_sce$time, sep = '_')
+)
+sc_summed$ids <- factor(x = sc_summed$ids)
+# 2023-01-19: discovered potential bug whereby timepoints in `ambient` did not correspond to matching celltype_time ids in `sc_summed`. According to ?ambientContribMaximum, these needs to be corresponding. Prior to date, it was not. 
+sc_summed$ids <- factor(
+  x = sc_summed$ids,
+  levels = apply(
+    X = expand.grid(levels(sc$time), levels(sc$celltype)), 
+    MARGIN = 1, 
+    FUN = function(x) paste(x[2],x[1],sep = '_')
+  )
+)
+sc_summed = sc_summed[, order(sc_summed$ids)]
+```
+
+```{r estimate-ambient-proportion}
+celltypes <- levels(sc$celltype)
+max.contrib <- list()
+for (c in celltypes) {
+  c.pull <- grepl(pattern = c, x = sc_summed$ids)
+  summed <- sc_summed[, c.pull]
+  matchingGroup = mapply(
+    colnames(ambient), 
+    colnames(summed), 
+    FUN = function(x,y) grepl(x, y)
+  )
+  if (!all(matchingGroup)) {
+    stop('column names for `summed` and `ambient` do not correspond to each other')
+  } else {
+    max.contrib[[c]] <- ambientContribMaximum(
+      y = counts(summed),
+      ambient = ambient,
+      threshold = 0.1,
+      mode = 'proportion'
+    )
+    message('Done with: ', c)
+  }
+}
+# tmp = neuron@meta.data %>% 
+#   filter(time == 'P4')
+# tmp1 = raw.counts$P4['Ttr', colnames(raw.counts$P4) %in% gsub('_P4', '', rownames(tmp))]
+# length(tmp1)
+# tmp2 = raw.counts$P4['Ttr', !colnames(raw.counts$P4) %in% gsub('_P4', '', rownames(tmp))]
+# length(tmp2)
+# data.frame(
+#   drops = c(rep('nucleus', length(tmp1)), rep('empty', length(tmp2))),
+#   ttr = c(tmp1, tmp2)
+# ) %>% 
+#   ggplot(mapping = aes(x = drops, y = ttr)) +
+#   # geom_point(mapping = aes)
+#   geom_violin() +
+#   scale_y_continuous(trans = 'log1p')
+```
+
+
+#### Identify sex-linked genes
+
+At the measured developmental time-points, and in particular for E19, it is difficult to determine the sex of the mouse. We can determine based on expression of the gene *Xist* that the animal sampled for E19 superior colliculus was derived from a male (lack of *Xist* expression). *Xist* is a non-coding RNA that inactivates one X chromosome. Because sex-linked genes pose a problem in terms of ambient RNA contamination, thereby being called differentially expressed between time-points, we desire to identify sex-linked genes to remove them. We can compare *Xist*(+) cells with *Xist*(-) cells to identify additional sex-linked genes.
+
+```{r}
+neuron$Xist_detection = ifelse(
+  test = neuron@assays$RNA@counts['Xist',] > 0,
+  yes = 'positive',
+  no = 'negative'
+)
+sexLinkedGenes = FindMarkers(
+  object = neuron, 
+  group.by = 'Xist_detection',
+  ident.1 = 'positive',
+  ident.2 = 'negative',
+  assay = 'RNA',
+  slot = 'data'
+)
+sex.genes <- c('Xist','Eif2s3y','Uty')
+head(sexLinkedGenes)
+```
+
+
+### Filter ambient RNA
+
+#### From celltype pairwise comparisons
+
+```{r filter-ambient-contamination-pairwise}
+# pairwise
+comparison.pairs <- expand.grid(levels(sc$time), levels(sc$time))
+comparison.pairs = comparison.pairs[comparison.pairs$Var1 != comparison.pairs$Var2,]
+comparison.pairs = apply(comparison.pairs, 2, as.character)
+celltypes <- levels(sc$celltype)
+deg.filtered <- vector('list', length(celltypes)); names(deg.filtered) <- celltypes
+ambient.summary <- list()
+for (c in celltypes) {
+  filtered <- list()
+  for (i in 1:length(deg[[c]])) {
+    ambient.columns <- grep(
+      pattern = paste(comparison.pairs[i,], collapse = '|'),
+      x = colnames(max.contrib[[c]])
+    )
+    # See `ambientContribMaximum-patterns.R` for reasoning behind the `threshold` value. Empirical comparison shows 0.2 might be suitable since this is the minimum threshold at which more genes are kept than discarded at all ranges of percent detection.
+    contamination = apply(
+      X = max.contrib[[c]][,ambient.columns],
+      MARGIN = 1,
+      FUN = function(x) {
+        highContrib = mean(x, na.rm = TRUE) > 0.2
+        # highContrib = abs(x[1] - x[2]) > 0.2
+        noValue = any(is.na(x))
+        y = ifelse(test = highContrib | noValue,
+                   yes = TRUE,
+                   no = FALSE)
+        return(y)
+      }
+    )
+    print(paste(c, names(deg[[c]])[i]))
+    print(table(contamination, useNA = 'ifany'))
+    # contamination <- apply(
+    #   X = max.contrib[[c]][, ambient.columns],
+    #   MARGIN = 1,
+    #   # FUN = function(x) {any(x > (3/10), na.rm = TRUE)}
+    #   FUN = function(x) mean(x, na.rm = TRUE) > 0.2
+    # )
+    # table(contamination, useNA = 'ifany')
+    
+    non.ambient <- rownames(max.contrib[[c]])[!contamination]
+    filtered[[i]] <- deg[[c]][[i]] %>% 
+      filter(p_val_adj < 0.05, 
+             gene %in% non.ambient, 
+             !gene %in% sex.genes)
+    ambient.summary[[c]] <- table(
+      nonambient = rownames(deg[[c]][[i]]) %in% non.ambient,
+      significant = deg[[c]][[i]]$p_val_adj < 0.05
+    )
+  }
+  names(filtered) <- names(deg[[c]])
+  deg.filtered[[c]] <- filtered
+}
+```
+
+```{r save-pairwise-filtered-deg}
+celltypes <- levels(sc$celltype)
+timepoints <- levels(sc$time)
+filtered.out <- paste0(results_out, 'celltype-time-pairwise-deg-ambient-filtered/')
+dir.create(path = filtered.out)
+for (c in celltypes) {
+  for (i in 1:length(deg.filtered[[c]])) {
+    write.csv(
+      x = deg.filtered[[c]][[i]], 
+      file = paste0(filtered.out, gsub(' ', '', c), '_', paste(comparison.pairs[i,], collapse = '-'), '.csv')
+    )
+  }
+}
+saveRDS(deg.filtered, file = paste0(results_out, 'celltype-time-pairwise-deg-filtered.rds'))
+```
+
+#### From celltype global comparisons
+
+```{r filter-ambient-contamination-global}
+# global
+time.deg.filtered <- vector('list', length(celltypes)); names(time.deg.filtered) <- celltypes
+timepoints <- levels(sc$time)
+ambient.summary <- list()
+for (c in celltypes) {
+  filteredDEG = vector(mode = 'list', length = length(timepoints))
+  names(filteredDEG) = timepoints
+  # For each timepoint, if the expected ambient contribution proportion exceeds log2(1.25/1), discard the gene as most of its log2FC may be ambient-derived
+  for (t in timepoints) {
+    timeCols = grepl(pattern = t, x = colnames(max.contrib[[c]]))
+    timeCols = max.contrib[[c]][,timeCols]
+    contamination = names(timeCols)[is.na(timeCols) | timeCols > 0.2]
+    filteredDEG[[t]] = time.deg[[c]] %>% 
+      filter(cluster == t) %>% 
+      filter(p_val_adj < 0.05) %>% 
+      filter(!gene %in% contamination) %>% 
+      filter(! gene %in% sex.genes)
+  }
+  time.deg.filtered[[c]] = Reduce(f = rbind, x = filteredDEG)
+  ambient.summary[[c]] <- table(
+    nonambient = time.deg[[c]]$gene %in% non.ambient,
+    significant = time.deg[[c]]$p_val_adj < 0.05
+  )
+  # # This filtering was applied to analyses/figures generated before 2023-1-17
+  # contamination <- apply(
+  #   X = max.contrib[[c]],
+  #   MARGIN = 1,
+  #   FUN = function(x) {any(x > (3/10), na.rm = TRUE)}
+  # )
+  # non.ambient <- rownames(max.contrib[[c]])[!contamination]
+  # time.deg.filtered[[c]] <- time.deg[[c]] %>% 
+  #   filter(p_val_adj < 0.05, gene %in% non.ambient, 
+  #          !gene %in% sex.genes)
+  # ambient.summary[[c]] <- table(
+  #   nonambient = time.deg[[c]]$gene %in% non.ambient,
+  #   significant = time.deg[[c]]$p_val_adj < 0.05
+  # )
+  print(ambient.summary[[c]])
+}
+```
+
+```{r save-global-filtered-deg}
+celltypes <- levels(sc$celltype)
+filtered.out <- paste0(results_out, 'celltype-time-global-deg-ambient-filtered/')
+dir.create(path = filtered.out)
+for (c in celltypes) {
+  write.csv(x = time.deg.filtered[[c]], file = paste0(filtered.out, gsub(' ', '',  c), '.csv'))
+}
+saveRDS(time.deg.filtered, file = paste0(results_out, 'celltype-time-global-deg-filtered.rds'))
+```
+
+#### From all-neuron pairwise comparisons
+
+```{r aggregate-pseudobulk}
+neuron_sce <- SingleCellExperiment(
+  assays = list(counts = neuron[['RNA']]@counts)
+)
+colData(neuron_sce) <- cbind(colData(neuron_sce), neuron@meta.data)
+neuron_summed <- aggregateAcrossCells(
+  x = neuron_sce,
+  ids = neuron_sce$time
+)
+neuron_summed$ids <- factor(x = neuron_summed$ids)
+neuron_summed = neuron_summed[, levels(neuron$time)]
+```
+
+```{r estimate-ambient-proportion}
+max.contrib <- ambientContribMaximum(
+  y = counts(neuron_summed),
+  ambient = ambient,
+  threshold = 0.1,
+  mode = 'proportion'
+)
+```
+
+```{r filter-ambient-contamination}
+neuron.deg.filtered <- list()
+neuron.ambient.summary <- list()
+for (i in 1:length(neuron.deg)) {
+  ambient.columns <- grep(
+    pattern = paste(comparison.pairs[i,], collapse = '|'),
+    x = colnames(max.contrib)
+  )
+  contamination = apply(
+    X = max.contrib[,ambient.columns],
+    MARGIN = 1,
+    FUN = function(x) {
+      highContrib = mean(x, na.rm = TRUE) > 0.2
+      noValue = any(is.na(x))
+      y = ifelse(test = highContrib | noValue,
+                 yes = TRUE,
+                 no = FALSE)
+      return(y)
+    }
+  )
+  print(table(contamination, useNA = 'ifany'))
+  # contamination <- apply(
+  #   X = max.contrib[,ambient.columns],
+  #   MARGIN = 1,
+  #   FUN = function(x) {any(x > 0.5, na.rm = TRUE)}
+  # )
+  non.ambient <- rownames(max.contrib)[!contamination]
+  neuron.deg.filtered[[i]] <- neuron.deg[[i]] %>% 
+      filter(p_val_adj < 0.05, 
+             gene %in% non.ambient, 
+             !gene %in% sex.genes)
+  neuron.ambient.summary[[i]] <- table(
+    nonambient = rownames(neuron.deg[[i]]) %in% non.ambient,
+    significant = neuron.deg[[i]]$p_val_adj < 0.05
+  )
+  print(neuron.ambient.summary[[i]])
+}
+names(neuron.deg.filtered) <- apply(comparison.pairs, 1, paste, collapse = '_')
+```
+
+```{r save-filtered-deg}
+neuron.filtered.out <- paste0(results_out, 'all-neuron-time-pairwise-deg-ambient-filtered/')
+dir.create(path = neuron.filtered.out)
+for (i in 1:length(neuron.deg.filtered)) {
+  write.csv(
+    x = neuron.deg.filtered[[i]],
+    file = paste0(neuron.filtered.out, names(neuron.deg.filtered)[i], '.csv')
+  )
+}
+saveRDS(neuron.deg.filtered, file = paste0(results_out, 'all-neuron-time-pairwise-deg-filtered.rds'))
+```
+
+#### From all-neuron global comparisons
+
+```{r aggregate-pseudobulk}
+neuron_sce <- SingleCellExperiment(
+  assays = list(counts = neuron[['RNA']]@counts)
+)
+colData(neuron_sce) <- cbind(colData(neuron_sce), neuron@meta.data)
+neuron_summed <- aggregateAcrossCells(
+  x = neuron_sce,
+  ids = neuron_sce$time
+)
+neuron_summed$ids <- factor(x = neuron_summed$ids)
+neuron_summed = neuron_summed[, levels(neuron$time)]
+```
+
+```{r estimate-ambient-proportion}
+max.contrib <- ambientContribMaximum(
+  y = counts(neuron_summed),
+  ambient = ambient,
+  threshold = 0.1,
+  mode = 'proportion'
+)
+```
+
+```{r filter-ambient-contamination}
+filteredDEG = vector(mode = 'list', length = length(timepoints))
+names(filteredDEG) = timepoints
+for (t in timepoints) {
+  timeCols = grepl(pattern = t, x = colnames(max.contrib))
+  timeCols = max.contrib[,timeCols]
+  contamination = names(timeCols)[is.na(timeCols) | timeCols > 0.2]
+  filteredDEG[[t]] = neuron.time.deg %>% 
+    filter(cluster == t) %>% 
+    filter(p_val_adj < 0.05) %>% 
+    filter(!gene %in% contamination) %>% 
+    filter(! gene %in% sex.genes)
+}
+neuron.time.deg.filtered = Reduce(f = rbind, x = filteredDEG)
+
+# time.deg.filtered[[c]] = Reduce(f = rbind, x = filteredDEG)
+# ambient.summary[[c]] <- table(
+#   nonambient = time.deg[[c]]$gene %in% non.ambient,
+#   significant = time.deg[[c]]$p_val_adj < 0.05
+# )
+# contamination <- apply(
+#   X = max.contrib,
+#   MARGIN = 1,
+#   FUN = function(x) {any(x > 0.5, na.rm = TRUE)}
+# )
+# non.ambient <- rownames(max.contrib)[!contamination]
+# neuron.time.deg.filtered <- neuron.time.deg %>% 
+#       filter(p_val_adj < 0.05, gene %in% non.ambient, !gene %in% sex.genes)
+table(
+  contamination = neuron.time.deg$gene %in% contamination,
+  significant = neuron.time.deg$p_val_adj < 0.05
+)
+```
+
+```{r save-filtered-deg}
+neuron.time.filtered.out <- paste0(results_out, 'all-neuron-time-global-deg-ambient-filtered/')
+dir.create(path = neuron.time.filtered.out)
+write.csv(x = neuron.time.deg.filtered, file = paste0(neuron.time.filtered.out, 'all-neuron-time-global-deg-ambient-filtered.csv'))
+saveRDS(neuron.time.deg.filtered, file = paste0(results_out, 'all-neuron-time-global-deg-filtered.rds'))
+```
+
+## Summary of filtered differential expression
+
+### Count celltype DEGs
+
+#### From unfiltered pairwise comparisons
+
+```{r, fig.height=3, fig.width=14}
+deg <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg.rds'))
+for (ct in celltypes) {
+  for (i in 1:length(deg[[ct]])) {
+    deg[[ct]][[i]]$comparison <- paste(comparison.pairs[i,], collapse = '_')
+  }
+  deg[[ct]] <- Reduce(f = rbind, x = deg[[ct]])
+  deg[[ct]]$celltype <- ct
+}
+deg <- Reduce(f = rbind, x = deg)
+deg.count <- deg %>%
+  filter(comparison %in% c('E19_P4', 'P4_P8', 'P8_P21'),
+         p_val_adj < 0.05) %>% 
+  mutate(direction = ifelse(test = avg_log2FC > 0,
+                            yes = 'Down-regulated', 
+                            no = 'Up-regulated'),
+         celltype = factor(celltype, levels = levels(sc$celltype))) %>% 
+  mutate(celltype = str_wrap_factor(celltype, width = 17)) %>% 
+  group_by(celltype, comparison, direction) %>% 
+  summarise(nDEG = n_distinct(gene)) %>% 
+  mutate(comparison = gsub(pattern = '_', replacement = '\U2192', comparison))
+p.deg.count <- deg.count %>% 
+  mutate(nDEG = ifelse(direction == 'Down-regulated', -nDEG, nDEG)) %>% 
+  ggplot(mapping = aes(x = comparison, y = nDEG)) +
+  geom_bar(mapping = aes(fill = direction), color = 'black', stat = 'identity') +
+  facet_wrap(. ~ celltype, nrow = 1) + 
+  geom_hline(yintercept = 0, linewidth = 0.5, color = 'black') +
+  ylab(label = 'Number of DEGs') +
+  scale_fill_manual(values = c('Up-regulated' = 'red', 'Down-regulated' = 'blue')) +
+  scale_y_continuous(breaks = seq(-900, 900, 150),
+                     labels = abs(seq(-900, 900, 150))) +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.text.x = element_text(angle = 35, hjust = 1,size = 12, color = 'black'),
+        axis.title.y = element_text(size = 14, color = 'black'),
+        axis.title.x = element_blank(),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        strip.text = element_text(size = 12, color = 'black'))
+ggsave(filename = paste0(results_out, 'celltype-time-pairwise-deg-count.tiff'), plot = p.deg.count, height = 3, width = 14, device = 'tiff', dpi = 320)
+p.deg.count
+```
+
+#### From filtered pairwise comparisons
+
+```{r, fig.height=3, fig.width=14}
+deg <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg-filtered.rds'))
+for (ct in celltypes) {
+  no.genes <- which(sapply(deg[[ct]], nrow) == 0)
+  for (i in 1:length(deg[[ct]])) {
+    if (i %in% no.genes) {
+      deg[[ct]][[i]]$comparison <- c()
+      deg[[ct]][[i]]$celltype <- c()
+    }
+    else {
+      deg[[ct]][[i]]$comparison <- paste(comparison.pairs[i,], collapse = '_')
+      deg[[ct]][[i]]$celltype <- ct
+    }
+  }
+  deg[[ct]] <- Reduce(f = rbind, x = deg[[ct]])
+}
+deg <- Reduce(f = rbind, x = deg)
+deg.count <- deg %>%
+  filter(comparison %in% c('E19_P4', 'P4_P8', 'P8_P21'),
+         p_val_adj < 0.05) %>% 
+  mutate(direction = ifelse(test = avg_log2FC > 0,
+                            yes = 'Down-regulated', 
+                            no = 'Up-regulated'),
+         celltype = factor(celltype, levels = levels(sc$celltype))) %>% 
+  mutate(celltype = str_wrap_factor(celltype, width = 17)) %>% 
+  group_by(celltype, comparison, direction) %>% 
+  summarise(nDEG = n_distinct(gene)) %>% 
+  mutate(comparison = gsub(pattern = '_', replacement = '\U2192', comparison))
+p.deg.count <- deg.count %>% 
+  mutate(nDEG = ifelse(direction == 'Down-regulated', -nDEG, nDEG)) %>% 
+  ggplot(mapping = aes(x = comparison, y = nDEG)) +
+  geom_bar(mapping = aes(fill = direction), color = 'black', stat = 'identity') +
+  facet_wrap(. ~ celltype, nrow = 1) + 
+  geom_hline(yintercept = 0, linewidth = 0.5, color = 'black') +
+  ylab(label = 'Number of DEGs') +
+  scale_fill_manual(values = c('Up-regulated' = 'red', 'Down-regulated' = 'blue')) +
+  scale_y_continuous(breaks = seq(-900, 900, 150),
+                     labels = abs(seq(-900, 900, 150))) +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.text.x = element_text(angle = 35, hjust = 1,size = 12, color = 'black'),
+        axis.title.y = element_text(size = 14, color = 'black'),
+        axis.title.x = element_blank(),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        strip.text = element_text(size = 12, color = 'black'))
+ggsave(filename = paste0(results_out, 'celltype-time-pairwise-deg-filtered-count.tiff'), plot = p.deg.count, height = 3, width = 11, device = 'tiff', dpi = 320)
+p.deg.count
+```
+
+#### From filtered global comparisons
+
+```{r, fig.height=3, fig.width=14}
+deg <- readRDS(file = paste0(results_out, 'celltype-time-global-deg-filtered.rds'))
+for (c in celltypes) {
+  print(table(deg[[c]]$cluster, deg[[c]]$p_val_adj < 0.05))
+  deg[[c]]$celltype <- c
+}
+deg <- Reduce(f = rbind, x = deg)
+p <- deg %>% 
+  mutate(dir = ifelse(sign(avg_log2FC) > 0, 'up', 'down')) %>% 
+  group_by(celltype, cluster, dir) %>% 
+  summarise(DEG = n_distinct(gene)) %>% 
+  ggplot(mapping = aes(x = cluster, y = DEG)) +
+  geom_bar(stat = 'identity', mapping = aes(fill = celltype)) +
+  facet_wrap(. ~ celltype, scales = 'free_y', nrow = 1) + 
+  theme_bw()
+ggsave(filename = paste0(results_out, 'celltype-time-global-deg-filtered-count.tiff'), plot = p, height = 2.5, width = 15, device = 'tiff', dpi = 320)
+p
+```
+
+### Count neuron DEGs
+
+#### From filtered pairwise comparisons
+
+##### Excitatory and Inhibitory Neurons
+
+```{r}
+deg <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg-filtered.rds'))
+for (ct in celltypes) {
+  no.genes <- which(sapply(deg[[ct]], nrow) == 0)
+  for (i in 1:length(deg[[ct]])) {
+    if (i %in% no.genes) {
+      deg[[ct]][[i]]$comparison <- c()
+      deg[[ct]][[i]]$celltype <- c()
+    }
+    else {
+      deg[[ct]][[i]]$comparison <- paste(comparison.pairs[i,], collapse = '_')
+      deg[[ct]][[i]]$celltype <- ct
+    }
+  }
+  deg[[ct]] <- Reduce(f = rbind, x = deg[[ct]])
+}
+deg <- Reduce(f = rbind, x = deg)
+deg.count <- deg %>%
+  filter(comparison %in% c('E19_P4', 'P4_P8', 'P8_P21'),
+         p_val_adj < 0.05) %>% 
+  filter(celltype %in% c('Excitatory Neuron', 'Inhibitory Neuron')) %>% 
+  mutate(direction = ifelse(test = avg_log2FC > 0,
+                            yes = 'Down-regulated', 
+                            no = 'Up-regulated')) %>% 
+  mutate(direction = factor(x = direction, 
+                            levels = c('Up-regulated','Down-regulated'))) %>% 
+  group_by(celltype, comparison, direction) %>% 
+  summarise(nDEG = n_distinct(gene)) %>% 
+  mutate(comparison = gsub(pattern = '_', replacement = '\U2192', comparison))
+deg.count <- deg.count %>% 
+  mutate(nDEG = ifelse(direction == 'Down-regulated', -nDEG, nDEG)) %>% 
+  ggplot(mapping = aes(x = comparison, y = nDEG)) +
+  geom_bar(mapping = aes(fill = direction), color = 'black', stat = 'identity') +
+  facet_wrap(. ~ celltype, nrow = 1) + 
+  geom_hline(yintercept = 0, linewidth = 0.5, color = 'black') +
+  ylab(label = 'Number of DEGs') +
+  scale_fill_manual(values = c('Up-regulated' = 'red', 'Down-regulated' = 'blue')) +
+  scale_y_continuous(breaks = seq(-1000, 1000, 50),
+                     labels = abs(seq(-1000, 1000, 50))) +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.text.x = element_text(angle = 35, hjust = 1,size = 12, color = 'black'),
+        axis.title.y = element_text(size = 14, color = 'black'),
+        axis.title.x = element_blank(),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        strip.text = element_text(size = 12, color = 'black'),
+        legend.position = 'top',
+        legend.direction = 'horizontal',
+        legend.box.margin = margin(0,0,0,0))
+ggsave(filename = paste0(results_out, 'neuron-time-pairwise-deg-filtered-count.tiff'), plot = deg.count, height = 3, width = 3.75, device = 'tiff', dpi = 320)
+deg.count
+```
+
+##### Astrocytes
+
+```{r}
+deg <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg-filtered.rds'))
+for (ct in celltypes) {
+  no.genes <- which(sapply(deg[[ct]], nrow) == 0)
+  for (i in 1:length(deg[[ct]])) {
+    if (i %in% no.genes) {
+      deg[[ct]][[i]]$comparison <- c()
+      deg[[ct]][[i]]$celltype <- c()
+    }
+    else {
+      deg[[ct]][[i]]$comparison <- paste(comparison.pairs[i,], collapse = '_')
+      deg[[ct]][[i]]$celltype <- ct
+    }
+  }
+  deg[[ct]] <- Reduce(f = rbind, x = deg[[ct]])
+}
+deg <- Reduce(f = rbind, x = deg)
+deg.count <- deg %>%
+  filter(comparison %in% c('E19_P4', 'P4_P8', 'P8_P21'),
+         p_val_adj < 0.05) %>% 
+  filter(celltype %in% c('Astrocyte')) %>% 
+  mutate(direction = ifelse(test = avg_log2FC > 0,
+                            yes = 'Down-regulated', 
+                            no = 'Up-regulated')) %>% 
+  mutate(direction = factor(x = direction, 
+                            levels = c('Up-regulated','Down-regulated'))) %>% 
+  group_by(celltype, comparison, direction) %>% 
+  summarise(nDEG = n_distinct(gene)) %>% 
+  mutate(comparison = gsub(pattern = '_', replacement = '\U2192', comparison))
+deg.count <- deg.count %>% 
+  mutate(nDEG = ifelse(direction == 'Down-regulated', -nDEG, nDEG)) %>% 
+  ggplot(mapping = aes(x = comparison, y = nDEG)) +
+  geom_bar(mapping = aes(fill = direction), color = 'black', stat = 'identity') +
+  facet_wrap(. ~ celltype, nrow = 1) + 
+  geom_hline(yintercept = 0, linewidth = 0.5, color = 'black') +
+  ylab(label = 'Number of DEGs') +
+  scale_fill_manual(values = c('Up-regulated' = 'red', 'Down-regulated' = 'blue')) +
+  scale_y_continuous(breaks = seq(-1000, 1000, 50),
+                     labels = abs(seq(-1000, 1000, 50))) +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.text.x = element_text(angle = 35, hjust = 1,size = 12, color = 'black'),
+        axis.title.y = element_text(size = 14, color = 'black'),
+        axis.title.x = element_blank(),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        strip.text = element_text(size = 12, color = 'black'),
+        legend.position = 'bottom',
+        legend.direction = 'vertical',
+        legend.box.margin = margin(0,0,0,0))
+ggsave(filename = paste0(results_out, 'astrocyte-time-pairwise-deg-filtered-count.tiff'), plot = deg.count, height = 3.5, width = 2.5, device = 'tiff', dpi = 320)
+deg.count
+```
+
+##### Oligo-lineage Cell
+
+```{r}
+deg <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg-filtered.rds'))
+for (ct in celltypes) {
+  no.genes <- which(sapply(deg[[ct]], nrow) == 0)
+  for (i in 1:length(deg[[ct]])) {
+    if (i %in% no.genes) {
+      deg[[ct]][[i]]$comparison <- c()
+      deg[[ct]][[i]]$celltype <- c()
+    }
+    else {
+      deg[[ct]][[i]]$comparison <- paste(comparison.pairs[i,], collapse = '_')
+      deg[[ct]][[i]]$celltype <- ct
+    }
+  }
+  deg[[ct]] <- Reduce(f = rbind, x = deg[[ct]])
+}
+deg <- Reduce(f = rbind, x = deg)
+deg.count <- deg %>%
+  filter(comparison %in% c('E19_P4', 'P4_P8', 'P8_P21'),
+         p_val_adj < 0.05) %>% 
+  filter(celltype %in% c('Oligo-lineage Cell')) %>% 
+  mutate(direction = ifelse(test = avg_log2FC > 0,
+                            yes = 'Down-regulated', 
+                            no = 'Up-regulated')) %>% 
+  mutate(direction = factor(x = direction, 
+                            levels = c('Up-regulated','Down-regulated'))) %>% 
+  group_by(celltype, comparison, direction) %>% 
+  summarise(nDEG = n_distinct(gene)) %>% 
+  mutate(comparison = gsub(pattern = '_', replacement = '\U2192', comparison))
+# Since there are no DEGs between P4 and P8, we have to artificially create a 0 count value
+deg.count = rbind(
+  deg.count, 
+  data.frame(
+    celltype = 'Oligo-lineage Cell',
+    comparison = 'P4\U2192P8',
+    direction = factor(x = 'Down-regulated',
+                       levels = c('Up-regulated','Down-regulated')),
+    nDEG = 0)
+)
+deg.count <- deg.count %>% 
+  mutate(nDEG = ifelse(direction == 'Down-regulated', -nDEG, nDEG)) %>% 
+  ggplot(mapping = aes(x = comparison, y = nDEG)) +
+  geom_bar(mapping = aes(fill = direction), color = 'black', stat = 'identity') +
+  facet_wrap(. ~ celltype, nrow = 1) + 
+  geom_hline(yintercept = 0, linewidth = 0.5, color = 'black') +
+  ylab(label = 'Number of DEGs') +
+  scale_fill_manual(values = c('Up-regulated' = 'red', 'Down-regulated' = 'blue')) +
+  scale_y_continuous(breaks = seq(-1000, 1000, 100),
+                     labels = abs(seq(-1000, 1000, 100))) +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 12, color = 'black'),
+        axis.text.y = element_text(size = 12, color = 'black'),
+        axis.text.x = element_text(angle = 35, hjust = 1,size = 12, color = 'black'),
+        axis.title.y = element_text(size = 14, color = 'black'),
+        axis.title.x = element_blank(),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        strip.text = element_text(size = 12, color = 'black'),
+        legend.position = 'bottom',
+        legend.direction = 'vertical',
+        legend.box.margin = margin(0,0,0,0))
+ggsave(filename = paste0(results_out, 'oligo-lineage-time-pairwise-deg-filtered-count.tiff'), plot = deg.count, height = 3.5, width = 2.5, device = 'tiff', dpi = 320)
+deg.count
+```
+
+
+## DEG heatmaps
+
+```{r load-heatmap-data}
+deg.filtered <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg-filtered.rds'))
+time.deg.filtered <- readRDS(file = paste0(results_out, 'celltype-time-global-deg-filtered.rds'))
+neuron.deg.filtered <- readRDS(file = paste0(results_out, 'all-neuron-time-pairwise-deg-filtered.rds'))
+neuron.time.deg.filtered <- readRDS(file = paste0(results_out, 'all-neuron-time-global-deg-filtered.rds'))
+```
+
+```{r}
+Idents(sc) <- 'celltype'
+DefaultAssay(sc) <- 'RNA'
+celltypes <- levels(sc$celltype)
+timepoints <- levels(sc$time)
+```
+
+```{r}
+x = c('P8_P21')
+y = setdiff(deg.filtered$`Excitatory Neuron`[[x]]$gene[deg.filtered$`Excitatory Neuron`[[x]]$p_val_adj < 0.01], deg.filtered$`Inhibitory Neuron`[[x]]$gene[deg.filtered$`Inhibitory Neuron`[[x]]$p_val_adj < 0.01])
+
+#Lrma P21 ex but not inh
+#
+VlnPlot(sc, group.by = 'celltype', pt.size = 0, split.by = 'time', features = 'Grin2a')
+```
+
+### Celltype, pairwise
+
+```{r}
+take <- c('E19_P4', 'P4_P8', 'P8_P21')
+tmp <- lapply(
+  X = deg.filtered,
+  FUN = function(x) x[take]
+)
+plot.genes <- list()
+for (c in celltypes) {
+  c.genes <- c()
+  for (i in 1:length(tmp[[c]])) {
+    if (nrow(tmp[[c]][[i]]) == 0) {
+      next
+    } else {
+      g <- tmp[[c]][[i]] %>% 
+        mutate(dir = ifelse(avg_log2FC > 0, 'up', 'down')) %>% 
+        group_by(dir) %>% 
+        filter(p_val_adj < 0.05) %>% 
+        top_n(wt = -p_val_adj, n = 10) %>% 
+        top_n(n = 12, wt = avg_log2FC) %>% 
+        arrange(avg_log2FC) %>% 
+        .[['gene']]
+      c.genes <- c(g, c.genes)
+    }
+  }
+  plot.genes[[c]] <- unique(c.genes)
+}
+```
+
+```{r time-deg-heatmap}
+PlotHeatmap <- function(object, features, ctype) {
+  DefaultAssay(object) <- 'RNA'
+  p <- FetchData(
+    object = object, 
+    vars = c('time','celltype', features),
+    slot = 'data'
+  ) %>% 
+    filter(celltype == ctype) %>% 
+    # filter(p_val_adj < 0.05) %>% 
+    mutate(across(.cols = where(is.numeric), .fns = scale)) %>% 
+    group_by(time, celltype) %>% 
+    summarise(across(.cols = where(is.numeric), .fns = mean)) %>% 
+    reshape2::melt(id.vars = c('time','celltype')) %>% 
+    ggplot(mapping = aes(x = time, y = variable)) +
+    geom_raster(mapping = aes(fill = value)) +
+    scale_fill_gradientn(
+      colors = rev(RColorBrewer::brewer.pal(n = 8, name = 'RdBu')),
+      name = 'Average\nscaled\nexpression'
+    ) +
+    scale_x_discrete(expand = c(0,0)) +
+    scale_y_discrete(expand = c(0,0)) +
+    ylab(label = 'Gene') +
+    xlab(label = 'Time-point') +
+    guides(fill = guide_colorbar(frame.colour = 'black',
+                                 ticks.colour = 'black'))
+  return(p)
+}
+heatmaps <- list()
+for (c in celltypes) {
+  heatmaps[[c]] <- PlotHeatmap(
+    object = sc, 
+    features = plot.genes[[c]], 
+    ctype = c
+  )
+}
+```
+
+```{r save-heatmaps}
+ggsave(
+  filename = paste0(results_out,'time-deg-pairwise-heatmap_ExcitatoryNeuron.tiff'),
+  plot = heatmaps$`Excitatory Neuron`,
+  height = 8, width = 4, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-pairwise-heatmap_InhibitoryNeuron.tiff'),
+  plot = heatmaps$`Inhibitory Neuron`,
+  height = 8, width = 4, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-pairwise-heatmap_Astrocyte.tiff'),
+  plot = heatmaps$Astrocyte,
+  height = 8, width = 4, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-pairwise-heatmap_Oligo-lineage.tiff'),
+  plot = heatmaps$`Oligo-lineage`,
+  height = 5, width = 4, dpi = 320, device = 'tiff'
+)
+# # No significant results
+# ggsave(
+#   filename = paste0(results_out,'time-deg-pairwise-heatmap_DividingCell.tiff'),
+#   plot = heatmaps$`Dividing Cell`,
+#   height = 2.5, width = 4, dpi = 320, device = 'tiff'
+# )
+# # No significant results
+ggsave(
+  filename = paste0(results_out,'time-deg-pairwise-heatmap_VascularLeptomeningealCell.tiff'),
+  plot = heatmaps$`Vascular Leptomeningeal Cell`,
+  height = 4, width = 4, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-pairwise-heatmap_EpithelialCell.tiff'),
+  plot = heatmaps$`Epithelial Cell`,
+  height = 2.25, width = 4, dpi = 320, device = 'tiff'
+)
+```
+
+### Celltype, union of pairwise enriched
+
+```{r}
+# deg.filtered <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg-filtered.rds'))
+# for (c in celltypes) {
+#   no.genes <- which(sapply(deg.filtered[[c]], nrow) == 0)
+#   for (i in 1:length(deg.filtered[[c]])) {
+#     if (i %in% no.genes) {
+#       deg.filtered[[c]][[i]]$comparison <- c()
+#       deg.filtered[[c]][[i]]$celltype <- c()
+#       deg.filtered[[c]][[i]]$group1 = c()
+#       deg.filtered[[c]][[i]]$group2 = c()
+#     } else {
+#       deg.filtered[[c]][[i]]$comparison <- paste(comparison.pairs[i,], collapse = '_')
+#       deg.filtered[[c]][[i]]$celltype <- ct
+#       deg.filtered[[c]][[i]] = deg.filtered[[c]][[i]] %>%
+#         tidyr::separate(col = comparison,
+#                         into = c('group1', 'group2'),
+#                         sep = '_',
+#                         remove = FALSE)
+#     }
+#   }
+#   deg.filtered[[c]] <- Reduce(f = rbind, x = deg.filtered[[c]])
+# }
+# plot.genes <- list()
+# for (c in celltypes) {
+#   c.genes = c()
+#   for (t in timepoints) {
+#     tmpDEG = deg.filtered[[c]] %>%
+#       filter(group1 %in% t) %>%
+#       filter(p_val_adj < 0.05) %>%
+#       filter(!grepl('^mt-', gene)) %>%
+#       top_n(wt = -p_val_adj, n = 5) %>%
+#       top_n(n = 5, wt = avg_log2FC) %>%
+#       # group_by(comparison) %>%
+#       arrange(avg_log2FC) %>%
+#       .[['gene']]
+#   }
+#   if (nrow(deg.filtered[[c]]) > 0) {
+#     tmpGenes = deg.filtered[[c]] %>%
+#       # tidyr::separate(col = comparison, into = c('group1', 'group2'), sep = '_') %>%
+#       # group_by(group1) %>%
+#       group_by(comparison) %>%
+#       filter(p_val_adj < 0.05) %>%
+#       filter(!grepl('^mt-', gene)) %>%
+#       top_n(wt = -p_val_adj, n = 10) %>%
+#       top_n(n = 12, wt = avg_log2FC) %>%
+#       group_by(comparison) %>%
+#       arrange(avg_log2FC) %>%
+#       .[['gene']]
+#   }
+# }
+# 
+# for (i in 1:length(tmp[[c]])) {
+#     if (nrow(tmp[[c]][[i]]) == 0) {
+#       next
+#     } else {
+#       g <- tmp[[c]][[i]] %>%
+#         mutate(dir = ifelse(avg_log2FC > 0, 'up', 'down')) %>%
+#         group_by(dir) %>%
+#         filter(p_val_adj < 0.05) %>%
+#         top_n(wt = -p_val_adj, n = 10) %>%
+#         top_n(n = 12, wt = avg_log2FC) %>%
+#         arrange(avg_log2FC) %>%
+#         .[['gene']]
+#       c.genes <- c(g, c.genes)
+#     }
+#   }
+#   plot.genes[[c]] <- unique(c.genes)
+# heatmaps <- list()
+# for (c in celltypes) {
+#   heatmaps[[c]] <- PlotHeatmap(
+#     object = sc,
+#     features = plot.genes[[c]],
+#     ctype = c
+#   )
+# }
+```
+
+
+### Celltype, global
+
+```{r}
+plot.genes <- lapply(
+  X = time.deg.filtered,
+  FUN = function(x) {
+    y <- x %>% 
+      group_by(cluster) %>% 
+      filter(avg_log2FC > 0) %>% 
+      filter(p_val_adj < 0.05) %>% 
+      top_n(n = 12, wt = -p_val_adj) %>% 
+      # top_n(n = 12, wt = -log10(p_val_adj) * avg_log2FC * (pct.1 - pct.2)) %>% 
+      top_n(n = 12, wt = avg_log2FC) %>%
+      arrange(cluster, avg_log2FC) %>%
+      .[['gene']]
+    y <- unique(y)
+    return(y)
+  }
+)
+plot.genes$`Excitatory Neuron` = c(
+  plot.genes$`Excitatory Neuron`[1:16],
+  'Zic1',
+  plot.genes$`Excitatory Neuron`[17:length(plot.genes$`Excitatory Neuron`)]
+)
+```
+
+```{r time-deg-heatmap}
+PlotHeatmap <- function(object, features, ctype) {
+  DefaultAssay(object) <- 'RNA'
+  p <- FetchData(
+    object = object, 
+    vars = c('time','celltype', features),
+    slot = 'data'
+  ) %>% 
+    filter(celltype == ctype) %>% 
+    mutate(across(.cols = where(is.numeric), .fns = scale)) %>% 
+    group_by(time, celltype) %>% 
+    summarise(across(.cols = where(is.numeric), .fns = mean)) %>% 
+    reshape2::melt(id.vars = c('time','celltype')) %>% 
+    ggplot(mapping = aes(x = time, y = variable)) +
+    geom_raster(mapping = aes(fill = value)) +
+    scale_fill_gradientn(
+      colors = rev(RColorBrewer::brewer.pal(n = 8, name = 'RdBu')),
+      name = 'Average\nscaled\nexpression'
+    ) +
+    scale_x_discrete(expand = c(0,0)) +
+    scale_y_discrete(expand = c(0,0)) +
+    labs(title = ctype) +
+    # ylab(label = 'Gene') +
+    # xlab(label = 'Time-point') +
+    theme(axis.text.x = element_text(size = 10, angle = 65, hjust = 1),
+          axis.text.y = element_text(size = 10),
+          axis.title = element_blank(),
+          panel.border = element_rect(fill = NA, color = 'black'),
+          axis.ticks.x = element_blank()) +
+    guides(fill = guide_colorbar(frame.colour = 'black',
+                                 ticks.colour = 'black'))
+  print(max(p$data$value))
+  print(min(p$data$value))
+  return(p)
+}
+heatmaps <- list()
+for (c in celltypes) {
+  heatmaps[[c]] <- PlotHeatmap(
+    object = sc, 
+    features = plot.genes[[c]], 
+    ctype = c
+  )
+}
+```
+
+```{r}
+ggsave(
+  filename = paste0(results_out,'time-deg-global-heatmap_ExcitatoryNeuron.tiff'),
+  plot = heatmaps$`Excitatory Neuron`,
+  height = 6.5, width = 3.75, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-global-heatmap_InhibitoryNeuron.tiff'),
+  plot = heatmaps$`Inhibitory Neuron`,
+  height = 6.5, width = 3.75, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-global-heatmap_Astrocyte.tiff'),
+  plot = heatmaps$Astrocyte,
+  height = 6.5, width = 3.95, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-global-heatmap_Oligo-lineage.tiff'),
+  plot = heatmaps$`Oligo-lineage`,
+  height = 6.5, width = 3.75, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-global-heatmap_DividingCell.tiff'),
+  plot = heatmaps$`Dividing Cell`,
+  height = 3, width = 3.75, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-global-heatmap_VascularLeptomeningealCell.tiff'),
+  plot = heatmaps$`Vascular Leptomeningeal Cell`,
+  height = 4.5, width = 3.75, dpi = 320, device = 'tiff'
+)
+ggsave(
+  filename = paste0(results_out,'time-deg-global-heatmap_EpithelialCell.tiff'),
+  plot = heatmaps$`Epithelial Cell`,
+  height = 2.25, width = 3.75, dpi = 320, device = 'tiff'
+)
+```
+
+```{r}
+max.val = round(max(c(heatmaps$`Excitatory Neuron`$data$value, heatmaps$`Inhibitory Neuron`$data$value)), 2)
+min.val = round(min(c(heatmaps$`Excitatory Neuron`$data$value, heatmaps$`Inhibitory Neuron`$data$value)), 2)
+
+p.ex = heatmaps$`Excitatory Neuron` +
+  labs(title = 'Excitatory neurons') +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.title = element_blank(),
+        panel.border = element_rect(color = 'black', fill = NA),
+        plot.title = element_text(size = 12),
+        legend.position = 'bottom',
+        legend.direction = 'horizontal') +
+  scale_fill_gradientn(
+    colors = rev(RColorBrewer::brewer.pal(n = 8, name = 'RdBu')),
+    name = 'Average scaled expression',
+    limits = c(min.val, max.val)
+  ) +
+  guides(fill = guide_colorbar(title.position = 'top',
+                               frame.colour = 'black',
+                               ticks.colour = 'black',
+                               title.hjust = 0.5))
+p.in = heatmaps$`Inhibitory Neuron` +
+  labs(title = 'Inhibitory neurons') +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1, size = 12),
+        axis.title = element_blank(),
+        panel.border = element_rect(color = 'black', fill = NA),
+        plot.title = element_text(size = 12),
+        legend.position = 'bottom',
+        legend.direction = 'horizontal') +
+  scale_fill_gradientn(
+    colors = rev(RColorBrewer::brewer.pal(n = 8, name = 'RdBu')),
+    name = 'Average scaled expression',
+    limits = c(min.val, max.val)
+  )  +
+  guides(fill = guide_colorbar(title.position = 'top',
+                               frame.colour = 'black',
+                               ticks.colour = 'black',
+                               title.hjust = 0.5))
+p.neuron.changes = (p.ex + p.in) + plot_layout(guides = 'collect') &
+  theme(legend.position = 'bottom') &
+  guides(fill = guide_colorbar(title.position = 'left',
+                               frame.colour = 'black',
+                               ticks.colour = 'black',
+                               title.hjust = 0.5))
+p.neuron.changes
+ggsave(filename = paste0(results_out, 'time-deg-global-heatmap_excitatory-inhibitory-neurons.tiff'), plot = p.neuron.changes, height = 7, width = 4.5, dpi = 320)
+```
+
+
+### Pan-neuronal, global
+
+```{r}
+plot.genes = neuron.time.deg.filtered %>% 
+  group_by(cluster) %>% 
+  filter(avg_log2FC > 0,
+         p_val_adj < 0.05) %>% 
+  top_n(n = 12, wt = -p_val_adj) %>% 
+  top_n(n = 12, wt = avg_log2FC) %>% 
+  arrange(cluster, avg_log2FC) %>% 
+  .[['gene']]
+neuron.heatmap = FetchData(
+  object = sc, 
+  vars = c('celltype', 'time', plot.genes),
+  slot = 'data'
+) %>% 
+  filter(celltype %in% c('Excitatory Neuron', 'Inhibitory Neuron')) %>% 
+  mutate(across(where(is.numeric), .fns = scale)) %>% 
+  group_by(time) %>% 
+  summarise(across(where(is.numeric), .fns = mean)) %>% 
+  reshape2::melt(id.vars = 'time') %>% 
+  ggplot(mapping = aes(x = time, y = variable)) +
+  geom_raster(mapping = aes(fill = value)) +
+  scale_fill_gradientn(
+    colors = rev(RColorBrewer::brewer.pal(n = 8, name = 'RdBu')),
+    name = 'Average scaled\nexpression'
+  ) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0)) +
+  xlab(label = 'Time-point') +
+  theme(panel.border = element_rect(fill = NA, color = 'black'),
+        axis.text.y = element_text(size = 12),
+        axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 12),
+        legend.text = element_text(size = 12, angle = 65, hjust = 1),
+        legend.title = element_text(size = 12),
+        legend.justification = 'center',
+        legend.position = 'bottom',
+        legend.direction = 'horizontal') +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black',
+                               title.position = 'top', title.hjust = 0.5))
+neuron.heatmap
+ggsave(filename = paste0(results_out, 'time-deg-global-heatmap_PanNeuronal.tiff'), plot = neuron.heatmap, device = 'tiff', height = 9, width = 3, dpi = 320)
+
+FeaturePlot(sc, 'Klf9', order = TRUE, split.by = 'time')
+VlnPlot(sc, 'Rtn1', group.by = 'celltype', split.by = 'time', pt.size = 0.1, slot = 'counts')
+```
+
+
+## Gene Ontology 
+
+```{r load-heatmap-data}
+deg.filtered <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg-filtered.rds'))
+time.deg.filtered <- readRDS(file = paste0(results_out, 'celltype-time-global-deg-filtered.rds'))
+neuron.deg.filtered <- readRDS(file = paste0(results_out, 'all-neuron-time-pairwise-deg-filtered.rds'))
+neuron.time.deg.filtered <- readRDS(file = paste0(results_out, 'all-neuron-time-global-deg-filtered.rds'))
+# neuron.deg.filtered <- readRDS(file = paste0(results_out, 'all-neuron-time-pairwise-deg.rds'))
+```
+
+```{r}
+Idents(sc) <- 'celltype'
+DefaultAssay(sc) <- 'RNA'
+celltypes <- levels(sc$celltype)
+timepoints <- levels(sc$time)
+```
+
+
+From `topGO` R package [usage manual](https://bioconductor.org/packages/devel/bioc/vignettes/topGO/inst/doc/topGO.pdf):
+
+> The p-values computed by the runTest function are unadjusted for multiple testing. We do not advocate against adjusting the p-values of the tested groups, however in many cases adjusted p-values might be misleading.
+
+
+### GO analysis of pan-neuronal globally enriched genes
+
+```{r}
+tmp = neuron.time.deg.filtered %>% 
+  mutate(Direction = ifelse(avg_log2FC > 0, 'up', 'down')) %>% 
+  mutate(GO.group = paste(cluster, Direction, sep = '_'))
+go.genes = split(x = tmp, f = tmp$GO.group)
+# go.genes = lapply(X = go.genes, FUN = function(x) table(x$p_val_adj < 0.05))
+gene.universe <- rownames(neuron)
+go.results <- vector(mode = 'list', length = length(go.genes))
+names(go.results) <- names(go.genes)
+for (i in seq_along(go.genes)) {
+  deg.df <- go.genes[[i]]
+  gene.input <- rep(1, length(gene.universe))
+  names(gene.input) <- gene.universe
+  gene.input[deg.df$gene] <- deg.df$p_val_adj
+  go.object <- new(
+    Class = 'topGOdata',
+    ontology = 'BP', 
+    allGenes = gene.input, 
+    geneSel = function(x) return(x < 0.05),
+    annot = annFUN.org,
+    mapping = 'org.Mm.eg.db', 
+    ID = 'Symbol', 
+    nodeSize = 10 # Note: this is arbitrary
+  )
+  go.result <- runTest(
+    object = go.object, 
+    algorithm = 'classic', 
+    statistic = 'fisher'
+  )
+  go.table <- GenTable(
+    object = go.object, 
+    pvalue = go.result, 
+    topNodes = length(usedGO(go.object)), 
+    numChar = 1000
+  )
+  go.table <- go.table %>% 
+    mutate(across(.cols = c('Annotated','Significant','Expected'),
+                  .fns = as.numeric))
+  go.table$pvalue[grepl('<', go.table$pvalue)] <- '1e-30'
+  go.table$pvalue <- as.numeric(go.table$pvalue)
+  q <- go.table$Significant
+  k <- length(go.object@allGenes[go.object@feasible])
+  m <- go.table$Expected
+  t <- length(go.object@allGenes[go.object@feasible])
+  go.table$Odds.Ratio <- (q/k)/(m/t)
+  go.table$Enrichment.Score <- -log10(go.table$pvalue) * go.table$Odds.Ratio
+  sig.genes = names(gene.input[gene.input < 0.05])
+  go.full.genes = genesInTerm(go.object, whichGO = go.table$GO.ID)
+  go.sig.in.full.genes = lapply(
+    X = go.full.genes,
+    FUN = function(x) x[x %in% sig.genes]
+  )
+  go.sig.in.full.genes = unlist(
+    lapply(
+      X = go.sig.in.full.genes,
+      FUN = paste,
+      collapse = ' '
+    ),
+    recursive = FALSE
+  )
+  go.table$SigGenes = go.sig.in.full.genes
+  go.results[[i]] <- go.table
+}
+rm(deg.df,gene.input,go.object,go.result,go.table,q,k,m,t)
+saveRDS(go.results, file = paste0(results_out, 'go-results-all-neuron-global-deg.rds'))
+```
+
+```{r inspect-pvalues}
+go.results <- readRDS(file = paste0(results_out, 'go-results-all-neuron-global-deg.rds'))
+tmp <- go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Time <- sapply(strsplit(names(tmp)[i], '_'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '_'), `[`, 2)
+}
+tmp <- Reduce(f = rbind, x = tmp)
+
+par(mfrow = c(1,2))
+hist(tmp$pvalue, breaks = 50)
+hist(tmp$pvalue[tmp$pvalue != 1], breaks = 50)
+par(mfrow = c(1,1))
+```
+
+```{r}
+for (i in seq_along(go.results)) {
+  tmp_name <- gsub(pattern = '\\.', replacement = '_', x = names(go.results)[i])
+  tmp_df <- go.results[[i]] %>% 
+    filter(Significant > 5,
+           pvalue < 0.05)
+  write.table(x = tmp_df, quote = FALSE, row.names = FALSE, file = paste0(goResults_out, 'GOresults_all-neurons-global-deg', tmp_name, '.tsv'), sep = '\t')
+}
+```
+
+```{r}
+tmp <- go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Comparison <- sapply(strsplit(names(tmp)[i], '_'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '_'), `[`, 2)
+}
+time.points = c('E19', 'P4', 'P8')
+goPlots = vector(mode = 'list', length = length(time.points))
+names(goPlots) = time.points
+for (i in 1:length(time.points)) {
+  takeCols = grep(pattern = time.points[i], x = names(tmp), value = TRUE)
+  tmpLabel = time.points[i]
+  plotData = Reduce(f = rbind, x = tmp[takeCols]) %>% 
+    # filter(Annotated > 10) %>%
+    # filter(Significant > 3) %>% 
+    mutate(log_pval = -log10(pvalue)) %>% 
+    mutate(Term = gsub('regulation', 'reg', Term),
+           Term = gsub('positive', 'pos', Term),
+           Term = gsub('negative', 'neg', Term)) %>% 
+    mutate(x = standardize_values(log_pval)^2,
+           y = standardize_values(Odds.Ratio)^2) %>% 
+    group_by(Direction) %>% 
+    mutate(score = sqrt(x^2 + y^2)) %>% 
+    mutate(rank = rank(-score, na.last = TRUE, ties.method = 'first')) %>% 
+    mutate(highlight = ifelse(rank < 5, 'yes', 'no')) %>% 
+    ungroup() %>% 
+    mutate(Direction = plyr::mapvalues(
+      x = Direction,
+      from = c('up','down'),
+      to = c(paste('Up-regulated', tmpLabel), paste('Down-regulated', tmpLabel))
+    ))
+  labelTerms = plotData[plotData$highlight == 'yes' & plotData$Significant >= 2,]
+  goPlots[[i]] = plotData %>% 
+    ggplot(mapping = aes(x = log_pval, y = Odds.Ratio)) +
+    geom_point(mapping = aes(color = highlight, size = highlight), alpha = 0.4) +
+    facet_wrap(. ~ Direction, ncol = 2) +
+    scale_y_log10() +
+    scale_color_manual(values = c('yes' = 'red', 'no' = 'black')) +
+    scale_size_manual(values = c('yes' = 3, 'no' = 1)) +
+    geom_vline(xintercept = -log10(0.05),
+               lty = 'dashed',
+               linewidth = 0.5,
+               color = 'red') +
+    ggrepel::geom_text_repel(
+      data = labelTerms,
+      aes(x = log_pval, y = Odds.Ratio, label = stringr::str_trunc(Term, width = 40)),
+      min.segment.length = 1,
+      force = 20,
+      size = 4
+    ) +
+    labs(
+      x = 'log10(p-value)',
+      y = 'Odds Ratio',
+    ) +
+    theme_bw() +
+    theme(axis.text = element_text(size = 14),
+          axis.title = element_text(size = 14),
+          strip.text = element_text(size = 14),
+          legend.position = 'none')
+}
+goPlots = cowplot::plot_grid(plotlist = goPlots, ncol = 1)
+ggsave(filename = paste0(results_out, 'topGO-results_all-neurons.tiff'), plot = goPlots, device = 'tiff', height = 12, width = 9, dpi = 320)
+```
+
+### GO analysis of pan-neuronal pairwise gene expression changes
+
+```{r}
+neuron.deg.filtered = neuron.deg.filtered[c('E19_P4','P4_P8','P8_P21')] 
+go.genes <- unlist(
+  x = lapply(
+    X = neuron.deg.filtered, 
+    FUN = function(x) {
+      split(x, f = ifelse(x$avg_log2FC > 0, yes = 'up', no = 'down'))
+    }
+  ),
+  recursive = FALSE,
+  use.names = TRUE
+)
+gene.universe <- rownames(neuron)
+go.results <- vector(mode = 'list', length = length(go.genes))
+names(go.results) <- names(go.genes)
+for (i in seq_along(go.genes)) {
+  deg.df <- go.genes[[i]]
+  gene.input <- rep(1, length(gene.universe))
+  names(gene.input) <- gene.universe
+  gene.input[deg.df$gene] <- deg.df$p_val_adj
+  go.object <- new(
+    Class = 'topGOdata',
+    ontology = 'BP', 
+    allGenes = gene.input, 
+    geneSel = function(x) return(x < 0.05),
+    annot = annFUN.org,
+    mapping = 'org.Mm.eg.db', 
+    ID = 'Symbol', 
+    nodeSize = 10 # Note: this is arbitrary
+  )
+  go.result <- runTest(
+    object = go.object, 
+    algorithm = 'classic', 
+    statistic = 'fisher'
+  )
+  go.table <- GenTable(
+    object = go.object, 
+    pvalue = go.result, 
+    topNodes = length(usedGO(go.object)), 
+    numChar = 1000
+  )
+  go.table <- go.table %>% 
+    mutate(across(.cols = c('Annotated','Significant','Expected'),
+                  .fns = as.numeric))
+  go.table$pvalue[grepl('<', go.table$pvalue)] <- '1e-30'
+  go.table$pvalue <- as.numeric(go.table$pvalue)
+  q <- go.table$Significant
+  k <- length(go.object@allGenes[go.object@feasible])
+  m <- go.table$Expected
+  t <- length(go.object@allGenes[go.object@feasible])
+  go.table$Odds.Ratio <- (q/k)/(m/t)
+  go.table$Enrichment.Score <- -log10(go.table$pvalue) * go.table$Odds.Ratio
+  # get genes in term
+  sig.genes = names(gene.input[gene.input < 0.05])
+  go.full.genes = genesInTerm(go.object, whichGO = go.table$GO.ID)
+  go.sig.in.full.genes = lapply(
+    X = go.full.genes,
+    FUN = function(x) x[x %in% sig.genes]
+  )
+  go.sig.in.full.genes = unlist(
+    lapply(
+      X = go.sig.in.full.genes,
+      FUN = paste,
+      collapse = ' '
+    ),
+    recursive = FALSE
+  )
+  go.table$SigGenes = go.sig.in.full.genes
+  go.results[[i]] <- go.table
+}
+rm(deg.df,gene.input,go.object,go.result,go.table,q,k,m,t, sig.genes, go.full.genes, go.sig.in.full.genes)
+saveRDS(go.results, file = paste0(results_out, 'go-results-all-neuron-pairwise-deg.rds'))
+```
+
+```{r inspect-pvalues}
+go.results <- readRDS(file = paste0(results_out, 'go-results-all-neuron-pairwise-deg.rds'))
+tmp <- go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Comparison <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 2)
+}
+tmp <- Reduce(f = rbind, x = tmp)
+
+par(mfrow = c(1,2))
+hist(tmp$pvalue, breaks = 50)
+hist(tmp$pvalue[tmp$pvalue != 1], breaks = 50)
+par(mfrow = c(1,1))
+```
+
+```{r}
+for (i in seq_along(go.results)) {
+  tmp_name <- gsub(pattern = '\\.', replacement = '_', x = names(go.results)[i])
+  tmp_df <- go.results[[i]] %>% 
+    filter(Significant > 5,
+           pvalue < 0.05)
+  write.csv(x = tmp_df, quote = FALSE, row.names = FALSE, file = paste0(goResults_out, 'GOresults_all-neurons-pairwise-deg_', tmp_name, '.csv'), )
+}
+```
+
+```{r}
+go.results <- readRDS(file = paste0(results_out, 'go-results-all-neuron-pairwise-deg.rds'))
+tmp <- go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Comparison <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 2)
+}
+time.pairs = c('E19_P4', 'P4_P8', 'P8_P21')
+plotData = vector(mode = 'list', length = length(time.pairs))
+names(plotData) = time.pairs
+labelTerms = vector(mode = 'list', length = length(time.pairs))
+names(labelTerms) = time.pairs
+for (i in 1:length(time.pairs)) {
+  takeCols = grep(pattern = time.pairs[i], x = names(tmp), value = TRUE)
+  tmpLabel = gsub(pattern = '_', replacement = '\U2192', x = time.pairs[i])
+  plotData[[i]] = Reduce(f = rbind, x = tmp[takeCols]) %>% 
+    # filter(Annotated > 10) %>%
+    # filter(Significant > 3) %>% 
+    mutate(log_pval = -log10(pvalue)) %>% 
+    mutate(log_Odds.Ratio = log10(Odds.Ratio)) %>% 
+    mutate(Term = gsub('regulation', 'reg', Term),
+           Term = gsub('positive', 'pos', Term),
+           Term = gsub('negative', 'neg', Term)) %>% 
+    mutate(x = standardize_values(log_pval)^2,
+           y = standardize_values(log_Odds.Ratio)^2) %>% 
+    group_by(Direction) %>% 
+    mutate(score = ifelse(
+      test = Significant >= 2 & (Annotated < 500 & Annotated > 30),
+      yes = sqrt(x^2 + y^2),
+      no = 0
+    )) %>% 
+    # mutate(rank = rank(-score, na.last = TRUE, ties.method = 'first')) %>% 
+    # mutate(highlight = ifelse(rank < 5, 'yes', 'no')) %>%
+    mutate(highlight = ifelse(test = isTopN(score, n = 5), 'yes', 'no')) %>% 
+    ungroup() %>% 
+    mutate(Direction = plyr::mapvalues(
+      x = Direction,
+      from = c('up','down'),
+      # NOTE: In DEG tests using FindMarkers above (see Differential Expression Testing section), 'UP' indicates greater expression first group. P4_P8.down indicates genes that are downregulated in P4 compared to P8 i.e. they are up-regulated going from P4 to P8. Hence, here, we flip the directionality.
+      to = c(paste('Down-regulated', tmpLabel), paste('Up-regulated', tmpLabel))
+    ))
+  labelTerms[[i]] = plotData[[i]] %>% 
+    filter(Significant >= 2) %>% 
+    filter(highlight == 'yes')
+}
+plotData = Reduce(f = rbind, x = plotData)
+labelTerms = Reduce(f = rbind, x = labelTerms)
+goPlot = plotData %>% 
+  mutate(Direction = factor(
+    x = Direction,
+    levels = c('Up-regulated E19\U2192P4', 'Down-regulated E19\U2192P4',
+               'Up-regulated P4\U2192P8', 'Down-regulated P4\U2192P8',
+               'Up-regulated P8\U2192P21', 'Down-regulated P8\U2192P21')
+  )) %>% 
+  ggplot(mapping = aes(x = log_pval, y = Odds.Ratio)) +
+  geom_point(mapping = aes(color = highlight, size = highlight, alpha = highlight)) +
+  facet_wrap(. ~ Comparison + Direction, 
+             scales = 'free',
+             ncol = 2, dir = 'h') +
+  scale_y_log10() +
+  scale_color_manual(values = c('yes' = 'red', 'no' = 'black')) +
+  scale_size_manual(values = c('yes' = 3, 'no' = 1)) +
+  scale_alpha_manual(values = c('yes' = 0.7, 'no' = 0.1)) +
+  geom_vline(xintercept = -log10(0.05),
+             lty = 'dashed',
+             linewidth = 0.5,
+             color = 'dodgerblue') +
+  ggrepel::geom_text_repel(
+    data = labelTerms,
+    aes(x = log_pval, 
+        y = Odds.Ratio, 
+        label = stringr::str_trunc(Term, width = 40)),
+    min.segment.length = 1,
+    force = 150,
+    size = 4.5,
+    color = 'red',
+    max.iter = 30000
+  ) +
+  labs(x = 'log10(p-value)', y = 'Odds Ratio') +
+  theme_bw() +
+  theme(axis.text = element_text(size = 16),
+        axis.title = element_text(size = 18),
+        strip.text = element_text(size = 16),
+        legend.position = 'none')
+ggsave(filename = paste0(results_out, 'topGO-results_all-neurons-pairwise-deg.tiff'), plot = goPlot, device = 'tiff', height = 14, width = 9, dpi = 320)
+# goPlot
+```
+
+### GO analysis of astrocyte pairwise gene expression changes
+
+```{r}
+astro.deg = deg.filtered$Astrocyte[c('E19_P4','P4_P8','P8_P21')]
+go.genes <- unlist(
+  x = lapply(
+    X = astro.deg, 
+    FUN = function(x) {
+      split(x, f = ifelse(x$avg_log2FC > 0, yes = 'up', no = 'down'))
+    }
+  ),
+  recursive = FALSE,
+  use.names = TRUE
+)
+gene.universe <- rownames(sc)
+go.results <- vector(mode = 'list', length = length(go.genes))
+names(go.results) <- names(go.genes)
+for (i in seq_along(go.genes)) {
+  deg.df <- go.genes[[i]]
+  gene.input <- rep(1, length(gene.universe))
+  names(gene.input) <- gene.universe
+  gene.input[deg.df$gene] <- deg.df$p_val_adj
+  go.object <- new(
+    Class = 'topGOdata',
+    ontology = 'BP', 
+    allGenes = gene.input, 
+    geneSel = function(x) return(x < 0.05),
+    annot = annFUN.org,
+    mapping = 'org.Mm.eg.db', 
+    ID = 'Symbol', 
+    nodeSize = 10 # Note: this is arbitrary
+  )
+  go.result <- runTest(
+    object = go.object, 
+    algorithm = 'classic', 
+    statistic = 'fisher'
+  )
+  go.table <- GenTable(
+    object = go.object, 
+    pvalue = go.result, 
+    topNodes = length(usedGO(go.object)), 
+    numChar = 1000
+  )
+  go.table <- go.table %>% 
+    mutate(across(.cols = c('Annotated','Significant','Expected'),
+                  .fns = as.numeric))
+  go.table$pvalue[grepl('<', go.table$pvalue)] <- '1e-30'
+  go.table$pvalue <- as.numeric(go.table$pvalue)
+  q <- go.table$Significant
+  k <- length(go.object@allGenes[go.object@feasible])
+  m <- go.table$Expected
+  t <- length(go.object@allGenes[go.object@feasible])
+  go.table$Odds.Ratio <- (q/k)/(m/t)
+  go.table$Enrichment.Score <- -log10(go.table$pvalue) * go.table$Odds.Ratio
+  # get genes in term
+  sig.genes = names(gene.input[gene.input < 0.05])
+  go.full.genes = genesInTerm(go.object, whichGO = go.table$GO.ID)
+  go.sig.in.full.genes = lapply(
+    X = go.full.genes,
+    FUN = function(x) x[x %in% sig.genes]
+  )
+  go.sig.in.full.genes = unlist(
+    lapply(
+      X = go.sig.in.full.genes,
+      FUN = paste,
+      collapse = ' '
+    ),
+    recursive = FALSE
+  )
+  go.table$SigGenes = go.sig.in.full.genes
+  go.results[[i]] <- go.table
+}
+rm(deg.df,gene.input,go.object,go.result,go.table,q,k,m,t, sig.genes, go.full.genes, go.sig.in.full.genes)
+saveRDS(go.results, file = paste0(results_out, 'go-results-astrocyte-pairwise-deg.rds'))
+```
+
+```{r inspect-pvalues}
+go.results <- readRDS(file = paste0(results_out, 'go-results-astrocyte-pairwise-deg.rds'))
+tmp <- go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Comparison <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 2)
+}
+tmp <- Reduce(f = rbind, x = tmp)
+
+par(mfrow = c(1,2))
+hist(tmp$pvalue, breaks = 50)
+hist(tmp$pvalue[tmp$pvalue != 1], breaks = 50)
+par(mfrow = c(1,1))
+```
+
+```{r}
+for (i in seq_along(go.results)) {
+  tmp_name <- gsub(pattern = '\\.', replacement = '_', x = names(go.results)[i])
+  tmp_df <- go.results[[i]] %>%
+    filter(Significant > 5,
+           pvalue < 0.05)
+  write.csv(x = tmp_df, quote = FALSE, row.names = FALSE, file = paste0(goResults_out, 'GOresults_astrocyte-pairwise-deg_', tmp_name, '.csv'), )
+}
+```
+
+```{r}
+go.results <- readRDS(file = paste0(results_out, 'go-results-astrocyte-pairwise-deg.rds'))
+tmp <- go.results
+for (i in seq_along(tmp)) {
+  tmp[[i]]$Comparison <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 1)
+  tmp[[i]]$Direction <- sapply(strsplit(names(tmp)[i], '\\.'), `[`, 2)
+}
+time.pairs = c('E19_P4', 'P4_P8', 'P8_P21')
+plotData = vector(mode = 'list', length = length(time.pairs))
+names(plotData) = time.pairs
+labelTerms = vector(mode = 'list', length = length(time.pairs))
+names(labelTerms) = time.pairs
+for (i in 1:length(time.pairs)) {
+  takeCols = grep(pattern = time.pairs[i], x = names(tmp), value = TRUE)
+  tmpLabel = gsub(pattern = '_', replacement = '\U2192', x = time.pairs[i])
+  nMin = 5
+  plotData[[i]] = Reduce(f = rbind, x = tmp[takeCols]) %>% 
+    # filter(Annotated > 10) %>%
+    # filter(Significant > 3) %>% 
+    mutate(log_pval = -log10(pvalue)) %>% 
+    mutate(log_Odds.Ratio = log10(Odds.Ratio)) %>% 
+    mutate(Term = gsub('regulation', 'reg', Term),
+           Term = gsub('positive', 'pos', Term),
+           Term = gsub('negative', 'neg', Term)) %>% 
+    mutate(x = standardize_values(log_pval)^2,
+           y = standardize_values(log_Odds.Ratio)^2) %>% 
+    group_by(Direction) %>% 
+    mutate(score = ifelse(
+      test = Significant >= nMin & (Annotated < 500 & Annotated > 30),
+      yes = sqrt(x^2 + y^2),
+      no = 0
+    )) %>% 
+    # mutate(rank = rank(-score, na.last = TRUE, ties.method = 'first')) %>% 
+    # mutate(highlight = ifelse(rank < 5, 'yes', 'no')) %>%
+    mutate(highlight = ifelse(test = isTopN(score, n = 5), 'yes', 'no')) %>% 
+    ungroup() %>% 
+    mutate(Direction = plyr::mapvalues(
+      x = Direction,
+      from = c('up','down'),
+      # NOTE: In DEG tests using FindMarkers above (see Differential Expression Testing section), 'UP' indicates greater expression first group. P4_P8.down indicates genes that are downregulated in P4 compared to P8 i.e. they are up-regulated going from P4 to P8. Hence, here, we flip the directionality.
+      to = c(paste('Down-regulated', tmpLabel), paste('Up-regulated', tmpLabel))
+    ))
+  labelTerms[[i]] = plotData[[i]] %>% 
+    filter(Significant >= nMin) %>% 
+    filter(highlight == 'yes')
+}
+plotData = Reduce(f = rbind, x = plotData)
+labelTerms = Reduce(f = rbind, x = labelTerms)
+goPlot = plotData %>% 
+  mutate(Direction = factor(
+    x = Direction,
+    levels = c('Up-regulated E19\U2192P4', 'Down-regulated E19\U2192P4',
+               'Up-regulated P4\U2192P8', 'Down-regulated P4\U2192P8',
+               'Up-regulated P8\U2192P21', 'Down-regulated P8\U2192P21')
+  )) %>% 
+  ggplot(mapping = aes(x = log_pval, y = Odds.Ratio)) +
+  geom_point(mapping = aes(color = highlight, size = highlight, alpha = highlight)) +
+  facet_wrap(. ~ Comparison + Direction, 
+             scales = 'free',
+             ncol = 2, dir = 'h') +
+  scale_y_log10() +
+  scale_color_manual(values = c('yes' = 'red', 'no' = 'black')) +
+  scale_size_manual(values = c('yes' = 3, 'no' = 1)) +
+  scale_alpha_manual(values = c('yes' = 0.7, 'no' = 0.1)) +
+  geom_vline(xintercept = -log10(0.05),
+             lty = 'dashed',
+             linewidth = 0.5,
+             color = 'dodgerblue') +
+  ggrepel::geom_text_repel(
+    data = labelTerms,
+    aes(x = log_pval, 
+        y = Odds.Ratio, 
+        label = stringr::str_trunc(Term, width = 40)),
+    min.segment.length = 1,
+    force = 150,
+    size = 4.5,
+    color = 'red',
+    max.iter = 30000
+  ) +
+  labs(x = 'log10(p-value)', y = 'Odds Ratio') +
+  theme_bw() +
+  theme(axis.text = element_text(size = 16),
+        axis.title = element_text(size = 18),
+        strip.text = element_text(size = 16),
+        legend.position = 'none')
+ggsave(filename = paste0(results_out, 'topGO-results_astrocyte-pairwise-deg.tiff'), plot = goPlot, device = 'tiff', height = 14, width = 9, dpi = 320)
+goPlot
+```
+
+## Inspection of specific genes
+
+```{r}
+Idents(sc) <- 'celltype'
+DefaultAssay(sc) <- 'RNA'
+celltypes <- levels(sc$celltype)
+timepoints <- levels(sc$time)
+# Unfiltered
+deg <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg.rds'))
+time.deg <- readRDS(file = paste0(results_out, 'celltype-time-global-deg.rds'))
+neuron.deg <- readRDS(file = paste0(results_out, 'all-neuron-time-pairwise-deg.rds'))
+neuron.time.deg <- readRDS(file = paste0(results_out, 'all-neuron-time-global-deg.rds'))
+# Filtered
+deg.filtered <- readRDS(file = paste0(results_out, 'celltype-time-pairwise-deg-filtered.rds'))
+time.deg.filtered <- readRDS(file = paste0(results_out, 'celltype-time-global-deg-filtered.rds'))
+neuron.deg.filtered <- readRDS(file = paste0(results_out, 'all-neuron-time-pairwise-deg-filtered.rds'))
+neuron.time.deg.filtered <- readRDS(file = paste0(results_out, 'all-neuron-time-global-deg-filtered.rds'))
+```
+
+```{r}
+time.deg.filtered$`Endothelial Cell`[time.deg.filtered$`Endothelial Cell`$gene == 'Zic1',]
+time.deg.filtered$Astrocyte[time.deg.filtered$Astrocyte$gene == 'Zic1',]
+deg.filtered$Astrocyte$E19_P4[deg.filtered$Astrocyte$E19_P4$gene=='Zic1',]
+deg$Astrocyte$P4_P21[deg.filtered$Astrocyte$P4_P21$gene=='Zic1',]
+```
+
+```{r}
+Idents(sc) = 'celltype'
+tmp = FindMarkers(
+  object = sc,
+  subset.ident = 'Endothelial Cell',
+  group.by = 'time',
+  ident.1 = 'E19',
+  ident.2 = 'P21',
+  features = 'Zic1',
+  logfc.threshold = 0
+)
+tmp
+VlnPlot(sc, 'Zic1', group.by = 'celltype', split.by = 'time', pt.size = 0.1, slot = 'counts') + scale_y_continuous(trans = 'log1p')
+```
+
+Zic1 is detected at high levels in vascular leptomeningeal and epithelial cells and does not change over time. It is also expressed by endothelial cells but it gradually decreases from E19 to P21. Statistically significant difference between E19 and P21, but not between E19 and P4. The percent of endothelial cells positive for Zic1 transcript at E19 is 70% but 17% at P21. Zic1 expression in Astrocytes is too low to calculate differential expression. The observed decrease in Zic1 detection in the Allen Brain Atlas in situ data may be driven primarily by neurons and endothelial cells.
+
+## Fin
+
+```{r}
+rm(list = ls()); gc()
+sessionInfo()
+```
+
+

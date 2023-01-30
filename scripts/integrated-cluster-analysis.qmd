@@ -1,0 +1,1049 @@
+---
+title: "Integrated cluster analysis"
+author: "James Choi"
+date: "Last compiled: `r Sys.Date()`"
+format:
+  html:
+    code-fold: false
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    link-external-newwindow: true
+    fig-align: center
+editor: source
+execute: 
+  cache: false
+  warning: false
+  message: false
+project:
+  execute-dir: project
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = 'D:/MiamiProject/Park_snSeq_SuperiorColliculus/')
+```
+
+# Setup
+
+```{r }
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(SingleCellExperiment)
+library(scran)
+library(scuttle)
+library(patchwork)
+library(dendextend)
+library(SingleR)
+```
+
+```{r }
+samplesheet <- read.csv(file = 'data/samplesheet.csv')
+sample_names <- samplesheet$SampleName
+```
+
+```{r }
+counts_path <- 'data/qc_filtered_feature_bc_matrix/'
+results_out <- 'results/integrated-cluster-analysis/'
+dir.create(path = results_out)
+```
+
+```{r }
+str_wrap_factor <- function(x, ...) {
+  levels(x) <- stringr::str_wrap(levels(x), ...)
+  return(x)
+}
+shuffle_rows <- function(df) {
+  x = df[sample(1:nrow(df), size = nrow(df)),]
+  return(x)
+}
+umap_theme <- theme_bw() + 
+  theme(panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank())
+time.cols <- c("#dd4539","#d9b123","#68c545","#514fd1")
+celltype.cols <- RColorBrewer::brewer.pal(n = 12, name = 'Paired')
+celltype.cols[11] <- 'gold'
+neuron.cols <- c("#c2444c","#e14327","#be6231","#de8d26","#debc22","#b99f3e","#a6c336","#6f9a3e","#63d135","#59c251","#4db873","#36dbbc","#7b85dc","#6074eb","#554ea8","#6934c4","#9253ea","#412070","#542298","#ac69d3","#ce4ce2","#d980cc","#cc4bb5","#df35bd","#92337c","#d54681")
+umap.axes <- ggplot(data.frame(x=10,y=10),aes(x=x,y,y)) +
+  geom_point() +
+  xlim(c(0,1)) + ylim(c(0,1)) +
+  theme_classic() +
+  xlab('UMAP 1') + ylab('UMAP 2') +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_text(size = 10),
+        axis.line = element_line(
+          color = 'black',
+          arrow = arrow(angle = 15, length = unit(.35, 'cm'), type = 'closed')
+        ),
+        panel.background = element_rect(fill = 'transparent', color = NA),
+        panel.border = element_rect(fill = 'transparent', color = NA)
+  )
+layout <- c(
+  patchwork::area(t = 11, l = 1, b = 11, r = 1),
+  patchwork::area(t = 1, l = 1, b = 11, r = 11)
+)
+```
+
+
+# Import data
+
+```{r }
+counts <- vector(mode = 'list', length = length(sample_names))
+names(counts) <- sample_names
+for (i in 1:length(sample_names)) {
+  counts[[i]] <- readRDS(file = paste0(counts_path, sample_names[i], '.rds'))
+}
+```
+
+```{r , eval=FALSE}
+sc <- readRDS(file = 'data/sc.rds')
+```
+
+```{r }
+for (i in 1:length(counts)) {
+  colnames(counts[[i]]) <- paste(colnames(counts[[i]]), sample_names[i], 
+                                 sep = '_')
+}
+```
+
+
+# Cluster analysis
+
+## On raw, uncorrected counts
+
+```{r }
+sc.simple <- vector(mode = 'list', length = length(sample_names))
+names(sc.simple) <- sample_names
+for (i in 1:length(sample_names)) {
+  sc.simple[[i]] <- CreateSeuratObject(
+    counts = counts[[i]], 
+    project = sample_names[i]
+  )
+  sc.simple[[i]] <- PercentageFeatureSet(
+    object = sc.simple[[i]],
+    pattern = '^mt-',
+    col.name = 'percent_mt'
+  )
+  sc.simple[[i]] <- PercentageFeatureSet(
+    object = sc.simple[[i]],
+    pattern = '^Rp[ls]',
+    col.name = 'percent_rp'
+  )
+}
+sc.simple <- Reduce(f = merge, x = sc.simple)
+sc.simple <- sc.simple %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures(nfeatures = 3000) %>% 
+  ScaleData() %>% 
+  RunPCA()
+sc.simple <- sc.simple %>% 
+  FindNeighbors(dims = 1:15) %>% 
+  FindClusters(resolution = 0.8) %>% 
+  RunUMAP(dims = 1:15, min.dist = 0.75, spread = 1)
+sc.simple$time <- factor(
+  x = sc.simple$orig.ident,
+  levels = c('E19','P4','P8','P21')
+)
+```
+
+```{r }
+#| fig.height: 9
+#| fig.width: 11
+p.time <- DimPlot(sc.simple, group.by = 'time', shuffle = TRUE) + umap_theme
+p.cluster <- DimPlot(sc.simple, group.by = 'seurat_clusters', label = TRUE, label.size = 4, repel = TRUE) + umap_theme + NoLegend()
+p.metadata <- sc.simple@meta.data %>% 
+  mutate(log10_nCount_RNA = log10(nCount_RNA + 1)) %>% 
+  select(c('seurat_clusters', 'nFeature_RNA','log10_nCount_RNA','percent_mt','percent_rp')) %>% 
+  reshape2::melt(id.vars = 'seurat_clusters') %>% 
+  ggplot(mapping = aes(x = seurat_clusters, y = value)) +
+  geom_violin(mapping = aes(fill = seurat_clusters), color = 'black', scale = 'width') +
+  facet_wrap(. ~ variable, ncol = 2, scales = 'free_y') +
+  theme_bw() +
+  theme(legend.position = 'none')
+
+p.summary <- (p.time | p.cluster) / p.metadata + patchwork::plot_layout(heights = c(1.5,1))
+ggsave(filename = paste0(results_out, 'simple-merge_summary.tiff'), plot = p.summary, height = 9, width = 11, device = 'tiff')
+p.summary
+```
+
+```{r }
+default.deg <- FindAllMarkers(sc.simple, logfc.threshold = 1, only.pos = TRUE)
+degShow = default.deg %>% 
+  mutate(across(where(is.numeric), .fns = signif, digits = 4))
+DT::datatable(degShow)
+```
+
+
+```{r }
+#| fig.height: 10
+#| fig.width: 8
+top.deg.genes <- default.deg %>% 
+  group_by(cluster) %>% 
+  filter(p_val_adj < 10e-50) %>%
+  top_n(n = 10, wt = -p_val_adj) %>% 
+  top_n(n = 2, wt = avg_log2FC) %>% 
+  ungroup()
+p.markers <- DotPlot(
+  object = sc.simple, 
+  assay = 'RNA', 
+  features = unique(top.deg.genes$gene)
+) +
+  coord_flip() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(filename = paste0(results_out, 'simple-merge_default-clusters_deg.tiff'), plot = p.markers, device = 'tiff', height = 10, width = 8)
+```
+
+```{r }
+#| fig.height: 4
+#| fig.width: 8
+canonical <- c('Slc17a6','Gad1','Gad2','Aqp4','Gfap','Olig1','Cspg4','Mbp','Csf1r','Ptprc','Col1a1','Vtn')
+p.canonical <- DotPlot(sc.simple, features = canonical) +
+  coord_flip() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(filename = paste0(results_out, 'simple-merge_default-clusters_canonical-markers.tiff'), plot = p.canonical, device = 'tiff', height = 4, width = 8)
+```
+
+
+## Down-sampling counts
+
+Because of the significant batch effects due to transcripts from genes such as `Xist`, `Ttr`, and highly-abundant transcripts derived from oligodendrocyte, I hypothesize that downsampling UMIs will not mitigate batch effects across samples.
+
+```{r}
+#| fig.height: 4.5
+#| fig.width: 5
+countsMerged = Reduce(f = cbind, x = counts)
+minUMI = data.frame(
+  libSize = sparseMatrixStats::colSums2(x = countsMerged),
+  SampleName = sapply(
+    X = strsplit(x = colnames(countsMerged), split = '_'), 
+    FUN = `[[`,
+    2
+  )
+) %>% 
+  group_by(SampleName) %>% 
+  summarise(minUMI = min(libSize))
+countsDownsampled = SampleUMI(
+  data = countsMerged,
+  max.umi = min(minUMI$minUMI),
+  upsample = FALSE,
+  verbose = TRUE
+)
+sc = CreateSeuratObject(counts = countsDownsampled)
+sc$SampleName = sapply(
+  X = strsplit(x = colnames(sc), split = '_'), 
+  FUN = `[[`,
+  2
+)
+sc = NormalizeData(sc)
+# sc.sce = SingleCellExperiment(
+#   assays = list(counts = sc@assays$RNA@counts,
+#                 logcounts = sc@assays$RNA@data)
+# )
+# colData(sc.sce) = cbind(colData(sc.sce), sc@meta.data)
+# geneInfo = modelGeneVar(x = sc.sce, block = sc.sce$SampleName)
+# scVarFeats = getTopHVGs(stats = geneInfo, fdr.threshold = 0.1)
+sc = sc %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA()
+# ElbowPlot(sc, ndims = 40)
+sc = sc %>% 
+  FindNeighbors(dims = 1:10) %>% 
+  FindClusters() %>% 
+  RunUMAP(dims = 1:10, min.dist = 0.5)
+p.downsample = DimPlot(
+  object = sc,
+  group.by = 'SampleName', 
+  shuffle = TRUE, 
+  pt.size = 1
+) + 
+  theme_void() +
+  labs(title = 'UMAP of downsampling-based integration') +
+  theme(legend.text = element_text(size = 12)) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+p.downsample = umap.axes + p.downsample + plot_layout(design = layout)
+ggsave(filename = paste0(results_out, 'downsampled-counts-integration.tiff'), plot = p.downsample, height = 4.5, width = 5, device = 'tiff', dpi = 320)
+p.downsample
+```
+
+The above UMAP demonstrates similar batch effect separation between samples as was demonstrated when cluster analysis was performed on the raw counts. Therefore, we need to use an alternative approach to identify shared/unique cell-types across developmental time-points.
+
+# Integrated analysis
+
+```{r }
+sc <- vector(mode = 'list', length = length(counts))
+names(sc) <- names(counts)
+for (i in 1:length(sc)) {
+  sc[[i]] <- CreateSeuratObject(counts = counts[[i]], project = names(counts)[i])
+  sc[[i]] <- PercentageFeatureSet(
+    object = sc[[i]],
+    pattern = '^mt-',
+    col.name = 'percent_mt'
+  )
+  sc[[i]] <- PercentageFeatureSet(
+    object = sc[[i]],
+    pattern = 'Rp[ls]',
+    col.name = 'percent_rp'
+  )
+  sc[[i]]$time <- factor(
+    x = sc[[i]]$orig.ident,
+    levels = c('E19','P4','P8','P21')
+  )
+}
+```
+
+```{r }
+sc <- lapply(
+  X = sc,
+  FUN = function(x) {
+    x <- NormalizeData(x)
+    x <- FindVariableFeatures(x, nfeatures = 3000)
+    return(x)
+  }
+)
+anchor.features <- SelectIntegrationFeatures(sc, nfeatures = 2500)
+anchors <- FindIntegrationAnchors(
+  object.list = sc,
+  anchor.features = anchor.features,
+  normalization.method = 'LogNormalize'
+)
+sc <- IntegrateData(
+  anchorset = anchors,
+  normalization.method = 'LogNormalize',
+)
+DefaultAssay(sc) <- 'integrated'
+sc <- sc %>% 
+  ScaleData() %>% 
+  RunPCA()
+ElbowPlot(sc, ndims = 40)
+sc <- sc %>% 
+  FindNeighbors(dims = 1:15) %>% 
+  FindClusters(resolution = 0.8) %>% 
+  RunUMAP(dims = 1:15)
+sc <- RunUMAP(sc, dims = 1:15, min.dist = 0.75, spread = 1)
+sc$time <- factor(
+  x = sc$orig.ident,
+  levels = c('E19','P4','P8','P21')
+)
+```
+
+```{r }
+#| fig.height: 6
+#| fig.width: 18.5
+p.time <- DimPlot(sc, group.by = 'time', shuffle = TRUE, pt.size = 0.75) +
+  scale_color_manual(values = time.cols) +
+  theme_void() + 
+  guides(color = guide_legend(override.aes = list(size = 6))) + 
+  theme(legend.text = element_text(size = 14),
+        plot.title = element_blank())
+p.time <- umap.axes + p.time + plot_layout(design = layout)
+# p.time
+p.cluster <- DimPlot(sc, group.by = 'seurat_clusters', label = TRUE, label.size = 5, repel = TRUE, pt.size = 0.75) + 
+  theme_void() + 
+  theme(legend.position = 'none')
+p.cluster <- umap.axes + p.cluster + plot_layout(design = layout)
+# p.cluster
+p.metadata <- sc@meta.data %>% 
+  mutate(log10_nCount_RNA = log10(nCount_RNA + 1)) %>% 
+  select(c('seurat_clusters', 'nFeature_RNA','log10_nCount_RNA','percent_mt','percent_rp')) %>% 
+  reshape2::melt(id.vars = 'seurat_clusters') %>% 
+  ggplot(mapping = aes(x = seurat_clusters, y = value)) +
+  geom_violin(mapping = aes(fill = seurat_clusters), color = 'black', scale = 'width') +
+  facet_wrap(. ~ variable, ncol = 1, scales = 'free_y') +
+  theme_bw() +
+  theme(legend.position = 'none',
+        strip.text = element_text(size = 10))
+p.summary <- cowplot::plot_grid(p.time, p.cluster, p.metadata, ncol = 3)
+ggsave(filename = paste0(results_out, 'integrated_summary.tiff'), plot = p.summary, height = 6, width = 18.5, device = 'tiff')
+p.summary
+```
+
+In a side-by-side comparison of the data before and after integration, we see that we are better able to identify shared and unique cell-types across developmental time-points after data integration.
+
+```{r}
+#| fig.height: 5
+#| fig.width: 11
+sc.integrated.umap <- DimPlot(sc, group.by = 'time', shuffle = TRUE, pt.size = 1) +
+  scale_color_manual(values = time.cols) +
+  theme_void() + 
+  labs(title = 'After integration') + 
+  guides(color = guide_legend(override.aes = list(size = 6))) + 
+  theme(legend.text = element_text(size = 14),
+        plot.title = element_text(size = 16))
+sc.integrated.umap <- umap.axes + sc.integrated.umap + plot_layout(design = layout)
+
+sc.simple.umap <- DimPlot(sc.simple, group.by = 'time', shuffle = TRUE, pt.size = 1) +
+  scale_color_manual(values = time.cols) +
+  theme_void() + 
+  labs(title = 'Before integration') + 
+  guides(color = guide_legend(override.aes = list(size = 6))) + 
+  theme(legend.text = element_text(size = 14),
+        plot.title = element_text(size = 16))
+sc.simple.umap <- umap.axes + sc.simple.umap + plot_layout(design = layout)
+p.integration <- cowplot::plot_grid(sc.simple.umap, sc.integrated.umap) + plot_layout(guides = 'collect')
+ggsave(filename = paste0(results_out, 'pre-post-integration-umap.tiff'), plot = p.integration, device = 'tiff', height = 5, width = 11, dpi = 320)
+p.integration
+```
+
+
+# Cell-type annotation
+
+To identify the cell-types in the dataset, I use a combination of differential
+expression testing, UMAP visualization across treatment groups, and automated
+annotation tools using reference data sets.
+
+## Diagnostic differential expression tests
+
+```{r }
+DefaultAssay(sc) <- 'RNA'
+default.deg <- FindAllMarkers(sc, logfc.threshold = 0.25, only.pos = TRUE)
+write.csv(x = default.deg, file = paste0(results_out, 'integrated_default-clusters_deg.csv'))
+degShow = default.deg %>% 
+  mutate(across(where(is.numeric), .fns = signif, digits = 3))
+DT::datatable(degShow)
+```
+
+
+```{r }
+#| fig.height: 11
+#| fig.width: 9
+default.deg = read.csv(file = paste0(results_out, 'integrated_default-clusters_deg.csv'), row.names = 1)
+top.deg.genes <- default.deg %>% 
+  group_by(cluster) %>% 
+  filter(p_val_adj < 10e-50) %>%
+  top_n(n = 10, wt = -p_val_adj) %>% 
+  top_n(n = 2, wt = avg_log2FC) %>% 
+  ungroup()
+p.markers <- DotPlot(
+  object = sc, 
+  assay = 'RNA', 
+  features = unique(top.deg.genes$gene)
+) +
+  coord_flip() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(filename = paste0(results_out, 'integrated_default-clusters_deg.tiff'), plot = p.markers, device = 'tiff', height = 11, width = 9)
+p.markers
+```
+
+## Canonical markers
+
+```{r}
+#| fig.height: 7.5
+#| fig.width: 10
+DefaultAssay(sc) <- 'RNA'
+known.markers <- c('Slc17a6','Gad1','Aqp4','Gfap','Cspg4','Bmp4','Mbp','Mki67','P2ry12','Cldn5','Col1a1','Cdh1')
+feature.plots <- vector(mode = 'list', length = length(known.markers))
+# names(feature.plots) <- levels(sc$celltype)
+label_x <- min(sc[['umap']]@cell.embeddings[,1]) * 0.95
+label_y <- max(sc[['umap']]@cell.embeddings[,2]) * 0.9
+for (i in seq_along(known.markers)) {
+  tmp <- FetchData(sc, vars = c('UMAP_1','UMAP_2',known.markers[i]))
+  max.val <- ceiling(max(tmp[,known.markers[i]])*10)/10
+  feature.plots[[i]] <- tmp[order(tmp[[known.markers[i]]]),] %>% 
+    ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+    geom_point(mapping = aes(color = !!as.name(known.markers[i])), size = 0.25) +
+    geom_text(data = data.frame('gene' = known.markers[i], x = label_x, y = label_y),
+              mapping = aes(label = gene, x = x, y = y),
+              fontface = 'italic',
+              size = 6.5,
+              hjust = 0) +
+    scale_color_gradient(low = 'grey90', high = 'blue',
+                         breaks = c(0, max.val),
+                         limits = c(0, max.val)) +
+    umap_theme +
+    theme(axis.title = element_blank(),
+          legend.position = c(0.875, 0.25),
+          legend.title = element_blank(),
+          legend.text = element_text(size = 12),
+          legend.background = element_rect(fill = NA)) +
+    guides(color = guide_colorbar(barwidth = 0.75, barheight = 2.5,
+                                  frame.colour = 'black',
+                                  ticks = FALSE,
+                                  frame.linewidth = 0.5))
+}
+p.canonical <- Reduce(f = `+`, x = feature.plots) + plot_layout(ncol = 4)
+ggsave(filename = paste0(results_out, 'canonical-markers-umap.tiff'), plot = p.canonical, device = 'tiff', height = 7.5, width = 10)
+p.canonical
+```
+
+
+## Run SingleR against reference data
+
+### Comparison against Zeisel et al. 2020
+
+Zeisel A, Hochgerner H, Lönnerberg P, Johnsson A, Memic F, van der Zwan J, Häring M, Braun E, Borm LE, La Manno G, Codeluppi S, Furlan A, Lee K, Skene N, Harris KD, Hjerling-Leffler J, Arenas E, Ernfors P, Marklund U, Linnarsson S. Molecular Architecture of the Mouse Nervous System. Cell. 2018 Aug 9;174(4):999-1014.e22. doi: 10.1016/j.cell.2018.06.021. PMID: 30096314; PMCID: PMC6086934.
+
+#### Load reference data
+
+[Link to paper](https://www.cell.com/cell/pdf/S0092-8674(18)30789-X.pdf)
+
+```{r}
+lfile.dim <- c(1:265, 1:27998)
+lfile <- hdf5r::h5file(filename = 'ref/l5_all.agg.loom', mode = 'r+')
+mat <- lfile[['matrix']][1:265, 1:27998]
+genes <- lfile[['row_attrs']][['Gene']][1:27998]
+names(lfile[['col_attrs']])
+barcode.description <- lfile[['col_attrs']][['Description']][1:265]
+barcode.clustername <- lfile[['col_attrs']][['ClusterName']][1:265]
+barcode.region <- lfile[['col_attrs']][['Region']][1:265]
+colnames(mat) <- genes
+rownames(mat) <- paste('Zeisel2020_cluster', 1:nrow(mat), sep = '.')
+mat <- t(mat)
+```
+
+#### Run SingleR
+
+```{r}
+shared.genes <- intersect(
+  x = rownames(sc[['RNA']]@data),
+  y = rownames(mat)
+)
+test.mat <- sc[['RNA']]@data[shared.genes, ]
+ref.mat <- mat[shared.genes, ]
+
+# Cluster description predictions
+ref.mat.labels <- barcode.description
+zeisel.singler <- SingleR(
+  test = test.mat,
+  ref = ref.mat,
+  labels = ref.mat.labels,
+  BPPARAM = BiocParallel::SnowParam(workers = 2)
+)
+write.csv(x = zeisel.singler, file = paste0(results_out, 'SingleR-results_Zeisel-2020-description_sc.csv'))
+
+# Cluster name (cell type name)
+ref.mat.labels <- barcode.clustername
+zeisel.singler <- SingleR(
+  test = test.mat,
+  ref = ref.mat,
+  labels = ref.mat.labels,
+  BPPARAM = BiocParallel::SnowParam(workers = 2)
+)
+write.csv(x = zeisel.singler, file = paste0(results_out, 'SingleR-results_Zeisel-2020-cluster-name_sc.csv'))
+
+# Brain region predictions
+ref.mat.labels <- barcode.region
+zeisel.singler <- SingleR(
+  test = test.mat,
+  ref = ref.mat,
+  labels = ref.mat.labels,
+  BPPARAM = BiocParallel::SnowParam(workers = 2)
+)
+write.csv(x = zeisel.singler, file = paste0(results_out, 'SingleR-results_Zeisel-2020-region_sc.csv'))
+rm(mat, barcode.clustername, barcode.description, barcode.region); gc()
+```
+
+
+#### Results
+
+```{r, eval=TRUE}
+zeisel2020.description.singler <- read.csv(file = paste0(results_out, 'SingleR-results_Zeisel-2020-description_sc.csv'), row.names = 1)
+zeisel2020.clustername.singler <- read.csv(file = paste0(results_out, 'SingleR-results_Zeisel-2020-cluster-name_sc.csv'), row.names = 1)
+zeisel2020.region.singler <- read.csv(file = paste0(results_out, 'SingleR-results_Zeisel-2020-region_sc.csv'), row.names = 1)
+
+sc$SingleR_Zeisel2020.description <- zeisel2020.description.singler$pruned.labels
+sc$SingleR_Zeisel2020.clustername <- zeisel2020.clustername.singler$pruned.labels
+sc$SingleR_Zeisel2020.region <- zeisel2020.region.singler$pruned.labels
+```
+
+```{r, eval=TRUE, fig.height=12, fig.width=13}
+p.zeisel.description <- DimPlot(sc, group.by = 'SingleR_Zeisel2020.description', label = TRUE) + theme_void() + theme(legend.position = 'none')
+p.zeisel.clustername <- DimPlot(sc, group.by = 'SingleR_Zeisel2020.clustername', label = TRUE) + theme_void() + theme(legend.position = 'none')
+p.zeisel.region <- DimPlot(sc, group.by = 'SingleR_Zeisel2020.region', label = TRUE) + theme_void() + theme(legend.position = 'none')
+p.zeisel <- lapply(X = list(p.zeisel.description, p.zeisel.clustername, p.zeisel.region), FUN = function(p) {umap.axes + p + plot_layout(design = layout)})
+
+ggsave(filename = paste0(results_out, 'SingleR_sc-dimplot_Zeisel2020.description.tiff'), plot = p.zeisel[[1]], device = 'tiff', height = 12, width = 13, dpi = 320)
+ggsave(filename = paste0(results_out, 'SingleR_sc-dimplot_Zeisel2020.clustername.tiff'), plot = p.zeisel[[2]], device = 'tiff', height = 12, width = 13, dpi = 320)
+ggsave(filename = paste0(results_out, 'SingleR_sc-dimplot_Zeisel2020.region.tiff'), plot = p.zeisel[[3]], device = 'tiff', height = 12, width = 13, dpi = 320)
+```
+
+```{r}
+#| fig.height: 7
+#| fig.width: 7
+showLabels = sc@meta.data %>% 
+  group_by(SingleR_Zeisel2020.description) %>%
+  dplyr::count() %>%
+  arrange(n) %>% 
+  filter(n > 10) %>% 
+  .[['SingleR_Zeisel2020.description']]
+labelCoords = FetchData(
+  object = sc,
+  vars = c('UMAP_1', 'UMAP_2', 'SingleR_Zeisel2020.description')
+) %>% 
+  filter(SingleR_Zeisel2020.description %in% showLabels) %>% 
+  mutate(SingleR_Zeisel2020.description = stringr::str_wrap(
+    string = SingleR_Zeisel2020.description,
+    width = 30
+  )) %>% 
+  group_by(SingleR_Zeisel2020.description) %>% 
+  summarise(umap.x = median(UMAP_1),
+            umap.y = median(UMAP_2))
+p.SingleR_Zeisel2020.description = FetchData(
+  object = sc,
+  vars = c('UMAP_1', 'UMAP_2', 'SingleR_Zeisel2020.description')
+) %>% 
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = SingleR_Zeisel2020.description),
+             size = 1) +
+  ggrepel::geom_text_repel(
+    data = labelCoords,
+    mapping = aes(x = umap.x, 
+                  y = umap.y, 
+                  label = SingleR_Zeisel2020.description),
+    size = 4, lineheight = 0.75, force = 2, min.segment.length = 0.05
+  ) +
+  scale_color_discrete() +
+  theme_void() +
+  theme(legend.position = 'none')
+p.SingleR_Zeisel2020.description = umap.axes + p.SingleR_Zeisel2020.description + plot_layout(design = layout)
+ggsave(filename = paste0(results_out, 'SingleR_sc-dimplot_Zeisel2020.description_select-clusters.tiff'), plot = 
+p.SingleR_Zeisel2020.description, device = 'tiff', height = 7, width = 7, dpi = 320)
+p.SingleR_Zeisel2020.description
+```
+
+```{r}
+#| fig.height: 11
+#| fig.width: 9
+p.SingleR_Zeisel2020.description.heatmap = table(
+  sc$SingleR_Zeisel2020.description, 
+  sc$time
+) %>%
+  as.data.frame() %>% 
+  ggplot(mapping = aes(x = Var2, y = Var1)) +
+  geom_tile(mapping = aes(fill = log2(Freq)), color = 'black') +
+  geom_text(mapping = aes(label = Freq)) +
+  scale_fill_viridis_c(option = 'A',
+                       name = 'log2(cell count)') +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0)) +
+  ylab(label = 'SingleR_Zeisel2020.description') +
+  xlab(label = 'Developmental time-point') +
+  theme(legend.text = element_text(size = 12),
+        axis.text = element_text(size = 12)) +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black'))
+ggsave(filename = paste0(results_out, 'SingleR_sc-dimplot_Zeisel2020.description_heatmap.tiff'), plot = p.SingleR_Zeisel2020.description.heatmap, device = 'tiff', height = 11, width = 9, dpi = 320)
+```
+
+## Annotate cell-types
+
+```{r}
+#| eval: false
+DimPlot(sc, group.by = 'integrated_snn_res.0.8', label = TRUE, label.size = 5, shuffle = TRUE) + theme_void()
+FetchData(sc, vars = c('UMAP_1', 'UMAP_2', 'SingleR_Zeisel2020.description')) %>% 
+  mutate(neuroblast = ifelse(
+    test = grepl('Neuroblast', SingleR_Zeisel2020.description),
+    yes = 'neuroblast',
+    no = 'not')
+  ) %>% 
+  arrange(desc(neuroblast)) %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = neuroblast)) +
+  scale_color_manual(values = c(neuroblast = 'red', not = 'black')) +
+  theme_void()
+```
+
+```{r }
+sc$celltype <- plyr::mapvalues(
+  x = sc$integrated_snn_res.0.8,
+  from = 0:30,
+  to = c('Excitatory Neuron',
+         'Astrocyte',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Vascular Leptomeningeal Cell',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Oligo-lineage Cell',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Astrocyte',
+         'Oligo-lineage Cell',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Dividing Cell',
+         'Epithelial Cell',
+         'Oligo-lineage Cell',
+         'Microglia',
+         'Inhibitory Neuron',
+         'Endothelial Cell')
+)
+sc$celltype <- factor(
+  x = sc$celltype,
+  levels = c('Excitatory Neuron',
+             'Inhibitory Neuron',
+             'Astrocyte',
+             'Oligo-lineage Cell',
+             'Dividing Cell',
+             'Microglia',
+             'Endothelial Cell',
+             'Vascular Leptomeningeal Cell',
+             'Epithelial Cell')
+)
+sc$celltype_subtype <- plyr::mapvalues(
+  x = sc$integrated_snn_res.0.8,
+  from = 0:30,
+  to = c('Excitatory Neuron',
+         'Protoplasmic Astrocyte',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Vascular Leptomeningeal Cell',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'OPC',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Fibrous Astrocyte',
+         'Myelinating Oligodendrocyte',
+         'Excitatory Neuron',
+         'Inhibitory Neuron',
+         'Inhibitory Neuron',
+         'Excitatory Neuron',
+         'Excitatory Neuron',
+         'Dividing Cell',
+         'Epithelial Cell',
+         'Committed Oligodendrocyte',
+         'Microglia',
+         'Inhibitory Neuron',
+         'Endothelial Cell')
+)
+
+sc$celltype_subtype <- factor(
+  x = sc$celltype_subtype,
+  levels = c('Excitatory Neuron',
+             'Inhibitory Neuron',
+             'Protoplasmic Astrocyte',
+             'Fibrous Astrocyte',
+             'OPC',
+             'Premyelinating Oligodendrocyte',
+             'Committed Oligodendrocyte',
+             'Myelinating Oligodendrocyte',
+             'Dividing Cell',
+             'Microglia',
+             'Endothelial Cell',
+             'Vascular Leptomeningeal Cell',
+             'Epithelial Cell')
+)
+```
+
+
+## Cell-type marker genes
+
+```{r }
+DefaultAssay(sc) <- 'RNA'
+Idents(sc) <- 'celltype'
+celltype.deg <- FindAllMarkers(sc, logfc.threshold = 0.25, only.pos = TRUE)
+write.csv(x = celltype.deg, file = paste0(results_out, 'integrated_celltype_deg.csv'))
+degShow = celltype.deg %>% 
+  mutate(across(where(is.numeric), .fns = signif, digits = 4))
+DT::datatable(degShow)
+```
+
+
+```{r }
+#| fig.height: 8.5
+#| fig.width: 6.25
+celltype.deg <- read.csv(file = paste0(results_out, 'integrated_celltype_deg.csv'), row.names = 1)
+top.deg.genes <- celltype.deg %>%
+  filter(p_val_adj < 10e-25,
+         pct.1 > 0.5,
+         !grepl('^Gm|Rik$', x = gene)) %>%
+  group_by(cluster) %>% 
+  top_n(n = 3, wt = -p_val_adj) %>%
+  top_n(n = 3, wt = avg_log2FC) %>%
+  ungroup()
+tmp <- DotPlot(
+  object = sc, 
+  assay = 'RNA', 
+  features = unique(top.deg.genes$gene)
+)
+p.markers <- tmp$data %>%
+  ggplot() + 
+  geom_point(mapping = aes(x = id, y = features.plot,
+                           size = pct.exp, 
+                           fill = avg.exp.scaled),
+             color = 'black', pch = 21) +
+  scale_radius(range = c(0,6)) +
+  scale_fill_viridis_c(option = 'A') +
+  xlab(label = 'Cell-type') +
+  ylab(label = 'Genes') +
+  theme_bw() +
+  theme(axis.title = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 12)) +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black',
+                               title = 'Average\nscaled\nexpression'),
+         size = guide_legend(title = 'Percent\nexpression',
+                             override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'integrated_celltype_deg.tiff'), plot = p.markers, device = 'tiff', height = 7.5, width = 4)
+p.markers
+```
+
+
+## Cell-type subtype marker genes
+
+```{r}
+DefaultAssay(sc) <- 'RNA'
+Idents(sc) <- 'celltype_subtype'
+celltype_subtype.deg <- FindAllMarkers(sc, logfc.threshold = 0.5, only.pos = TRUE)
+write.csv(x = celltype_subtype.deg, file = paste0(results_out, 'integrated_celltype-subtype_deg.csv'))
+degShow = celltype_subtype.deg %>% 
+  mutate(across(where(is.numeric), .fns = signif, digits = 4))
+DT::datatable(degShow)
+```
+
+
+```{r}
+#| fig.height: 9
+#| fig.width: 4.5
+celltype_subtype.deg <- read.csv(file = paste0(results_out, 'integrated_celltype-subtype_deg.csv'), row.names = 1)
+top.deg.genes <- celltype_subtype.deg %>%
+  filter(p_val_adj < 10e-25,
+         pct.1 > 0.5,
+         !grepl('^Gm|Rik$', x = gene)) %>%
+  group_by(cluster) %>% 
+  top_n(n = 3, wt = -p_val_adj) %>%
+  top_n(n = 3, wt = avg_log2FC) %>%
+  ungroup()
+tmp <- DotPlot(
+  object = sc, 
+  assay = 'RNA', 
+  features = unique(top.deg.genes$gene)
+)
+p.subtype_markers <- tmp$data %>%
+  ggplot() + 
+  geom_point(mapping = aes(x = id, y = features.plot,
+                           size = pct.exp, 
+                           fill = avg.exp.scaled),
+             color = 'black', pch = 21) +
+  scale_radius(range = c(0,6)) +
+  scale_fill_viridis_c(option = 'A') +
+  xlab(label = 'Cell-type subtype') +
+  ylab(label = 'Genes') +
+  theme_bw() +
+  theme(axis.title = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 12)) +
+  guides(fill = guide_colorbar(frame.colour = 'black',
+                               ticks.colour = 'black',
+                               title = 'Average\nscaled\nexpression'),
+         size = guide_legend(title = 'Percent\nexpression',
+                             override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'integrated_celltype-subtype_deg.tiff'), plot = p.subtype_markers, device = 'tiff', height = 9, width = 4.5)
+p.subtype_markers
+```
+
+
+# Summarizing cell-types across development
+
+## Cell-type UMAP
+
+```{r}
+#| fig.height: 4.5
+#| fig.width: 7
+labelCoords = FetchData(
+  object = sc,
+  vars = c('UMAP_1', 'UMAP_2', 'celltype')
+) %>% 
+  mutate(celltype = stringr::str_wrap(
+    string = celltype,
+    width = 30
+  )) %>% 
+  group_by(celltype) %>% 
+  summarise(umap.x = median(UMAP_1),
+            umap.y = median(UMAP_2))
+p.celltype.labeled = FetchData(
+  object = sc,
+  vars = c('UMAP_1', 'UMAP_2', 'celltype')
+) %>% 
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = celltype),
+             size = 1) +
+  ggrepel::geom_text_repel(
+    data = labelCoords,
+    mapping = aes(x = umap.x, 
+                  y = umap.y, 
+                  label = stringr::str_wrap(celltype, width = 15)),
+    size = 4.5, lineheight = 0.75, force = 1, min.segment.length = 0.05
+  ) +
+  scale_color_manual(values = celltype.cols, name = 'Cell-type') +
+  theme_void() +
+  theme(legend.position = 'none',
+        plot.title = element_blank())
+p.celltype.labeled <- umap.axes + p.celltype.labeled + plot_layout(design = layout)
+ggsave(filename = paste0(results_out, 'integrated_celltype-labeled.tiff'), plot = p.celltype.labeled, device = 'tiff', dpi = 320, height = 5, width = 5)
+
+p.celltype <- DimPlot(sc, group.by = 'celltype', pt.size = 1) +
+  scale_color_manual(values = celltype.cols, name = 'Cell-type') + 
+  theme_void() +
+  theme(legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        plot.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5)))
+p.celltype <- umap.axes + p.celltype + plot_layout(design = layout)
+ggsave(filename = paste0(results_out, 'integrated_celltype.tiff'), plot = p.celltype, device = 'tiff', dpi = 320, height = 4.5, width = 7)
+p.celltype
+```
+
+
+## Developmental time-point UMAP
+
+```{r}
+#| fig.height: 4.5
+#| fig.width: 5.75
+p.time <- FetchData(sc, vars = c('celltype', 'time', 'UMAP_1', 'UMAP_2')) %>%
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = time), size = 0.75) +
+  scale_color_manual(values = time.cols,
+                     name = 'Time-point') +
+  theme_void() +
+  theme(legend.text = element_text(size = 12),
+        legend.title = element_text(size = 14),
+        axis.title = element_blank(),
+        strip.text = element_text(size = 14)) + 
+  guides(color = guide_legend(override.aes = list(size = 5)))
+p.time <- umap.axes + p.time + plot_layout(design = layout)
+ggsave(filename = paste0(results_out, 'integrated_time.tiff'), plot = p.time, device = 'tiff', height = 4.5, width = 5.75)
+p.time
+```
+
+
+## Cell-types across developmentUMAP
+
+```{r}
+#| fig.height: 2.75
+#| fig.width: 12.5
+p.timesplit <- FetchData(sc, vars = c('celltype', 'time', 'UMAP_1', 'UMAP_2')) %>%
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(mapping = aes(color = celltype), size = 0.75) +
+  facet_grid(. ~ time) +
+  scale_color_manual(values = celltype.cols,
+                     name = 'Cell-type') +
+  umap_theme +
+  theme(legend.text = element_text(size = 12),
+        legend.title = element_text(size = 14),
+        axis.title = element_blank(),
+        strip.text = element_text(size = 14)) + 
+  guides(color = guide_legend(override.aes = list(size = 5)))
+p.timesplit
+ggsave(filename = paste0(results_out, 'integrated_time-split.tiff'), plot = p.timesplit, device = 'tiff', height = 2.75, width = 12.5)
+```
+
+
+## Development time-point highlight UMAP
+
+```{r}
+#| fig.height: 6
+#| fig.width: 6
+umapCoords = FetchData(object = sc, vars = c('UMAP_1', 'UMAP_2'))
+umapCoords = rep(x = list(umapCoords), times = 4)
+for (i in 1:length(levels(sc$time))) {
+  umapCoords[[i]] = umapCoords[[i]] %>% 
+    tibble::rownames_to_column(var = 'barcode') %>% 
+    tidyr::separate(col = 'barcode',
+                    into = c('barcode','time'), 
+                    sep = '_') %>% 
+  mutate(dummyTime = levels(sc$time)[i],
+         time = factor(x = time, levels = levels(sc$time)))
+}
+umapCoords = Reduce(f = rbind, x = umapCoords) %>% 
+  mutate(inTime = ifelse(test = time == dummyTime,
+                         yes = 'inTime',
+                         no = 'outTime')) %>%
+  arrange(desc(inTime))
+p.highlight = ggplot(data = umapCoords) +
+  geom_point(mapping = aes(x = UMAP_1, y = UMAP_2, color = inTime),
+             size = 0.1) +
+  facet_wrap(. ~ dummyTime) +
+  scale_color_manual(values = c('inTime' = 'black', 'outTime' = 'grey80')) +
+  theme_bw() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        legend.position = 'none',
+        strip.text = element_text(size = 12),
+        axis.title = element_text(size = 12))
+ggsave(filename = paste0(results_out, 'integrated_time-highlight.tiff'), plot = p.highlight, device = 'tiff', height = 6, width = 6, dpi = 320)
+p.highlight
+```
+
+
+Cell-type proportions across development:
+
+```{r }
+#| fig.height: 3
+#| fig.width: 5.5
+sc$time <- factor(
+  x = sc$time,
+  levels = c('E19','P4','P8','P21')
+)
+p.proportion <- prop.table(table('Celltype' = sc$celltype, 'time' = sc$time), margin = 2) %>% 
+  data.frame() %>% 
+  ggplot(mapping = aes(x = time, y = Freq)) + 
+  geom_bar(mapping = aes(fill = Celltype),
+           stat = 'identity', 
+           color = 'black') +
+  ylab(label = 'Proportion') +
+  xlab(label = 'Time-point') +
+  scale_fill_manual(values = celltype.cols,
+                    name = 'Cell-type') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_discrete(expand = c(0,0)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        panel.grid = element_blank())
+ggsave(filename = paste0(results_out, 'integrated_celltype-proportions.tiff'),
+       plot = p.proportion, device = 'tiff', height = 3, width = 5.5)
+p.proportion
+```
+
+
+# End
+
+```{r}
+saveRDS(sc, file = 'data/sc.rds')
+```
+
+
+```{r fin}
+rm(list = ls())
+gc(verbose=FALSE)
+sessionInfo()
+```

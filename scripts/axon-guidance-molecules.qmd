@@ -1,0 +1,1002 @@
+---
+title: "Axon guidance molecule expression in developing SC"
+author: "James Choi"
+date: "Last compiled: `r Sys.Date()`"
+format:
+  html:
+    code-fold: false
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    link-external-newwindow: true
+    fig-align: center
+editor: source
+execute: 
+  cache: true
+  warning: false
+  message: false
+project:
+  execute-dir: project
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = 'D:/MiamiProject/Park_snSeq_SuperiorColliculus/')
+```
+
+## Background
+
+Superior colliculus is innervated by RGC axons during the early post-natal period i.e. between E19 and P8. Innervation by these projections have previously been described to be sequential - different anatomical areas of SC are innervated at different time (e.g. anterior vs posterior). 
+
+Hypothesis: Cells of SC express axon guidance molecules in time-dependent manner that coincides with RGC projection innervation.
+
+```{r directories}
+results_out <- 'results/axon-guidance-molecules/'
+dir.create(path = results_out)
+```
+
+
+## Setup
+
+```{r libraries}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(KEGGREST)
+library(ComplexHeatmap)
+library(patchwork)
+```
+
+```{r params}
+my_feat_cols <- c('grey90','skyblue','royalblue','darkorchid','violetred','red')
+str_wrap_factor <- function(x, ...) {
+  levels(x) <- stringr::str_wrap(levels(x), ...)
+  x
+}
+shuffle_rows <- function(df) {
+  df[sample(1:nrow(df), size = nrow(df), replace = FALSE),]
+}
+str_wrap_factor <- function(x, ...) {
+  levels(x) <- stringr::str_wrap(levels(x), ...)
+  return(x)
+}
+time.cols <- c("#dd4539","#d9b123","#68c545","#514fd1")
+celltype.cols <- RColorBrewer::brewer.pal(n = 12, name = 'Paired')
+celltype.cols[11] <- 'gold'
+neuron.cols <- c("#c2444c","#e14327","#be6231","#de8d26","#debc22","#b99f3e","#a6c336","#6f9a3e","#63d135","#59c251","#4db873","#36dbbc","#7b85dc","#6074eb","#554ea8","#6934c4","#9253ea","#542298","#ac69d3","#ce4ce2","#d980cc","#cc4bb5","#df35bd","#92337c","#d54681")
+```
+
+```{r load-data}
+sc <- readRDS(file = 'data/sc.rds')
+neuron <- readRDS(file = 'data/neuron.rds')
+```
+
+```{r umaps, fig.height=4.5, fig.width=10}
+p1 <- DimPlot(sc, label = TRUE, group.by = 'celltype') +
+  xlab(label = 'UMAP1') +
+  ylab(label = 'UMAP2') +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none')
+p2 <- DimPlot(sc, group.by = 'time', split.by = 'time', ncol = 2) +
+  xlab(label = 'UMAP1') +
+  ylab(label = 'UMAP2') +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'none')
+(p1 | p2) + patchwork::plot_layout()
+```
+
+
+## Guidance molecule gene set
+
+First we query expression of the axon guidance molecules in all cell-types.
+
+
+### GeneCopoeia ExProfile Array
+
+From https://www.genecopoeia.com/product/pathway-gene-qpcr-arrays/
+
+Gene list #013 (QG013): ExProfile™ Human Extracellular Matrix and Adhesion Molecules Related Gene qPCR Array
+
+```{r qg.genes}
+# This was written manually because reading the PDF was a pain.
+qg.genes <- c('SPG7','FN1','CD44','HPRT1','VTN','VCAM1','TNC','CLEC3B','TIMP3','TIMP2','TIMP1','THBS3','THBS2','THBS1','TGFBI','SPP1','SPG7','SPARC','SGCE','SELP','SELL','SELE','PECAM1','MMP9','MMP8','MMP7','MMP3','MMP16','MMP15','MMP14','MMP13','MMP12','MMP11','MMP10','MMP1','LAMB1','LAMA3','LAMA2','LAMA1','KAL1','ITGB5','ITGB3','ITGB3','ITGB2','ITGB1','ITGAV','ITGAM','ITGAL','ITGA8','ITGA7','ITGA6','ITGA5','ITGA4','ITGA2','ITGA1','ICAM1','CTNND1','CTNNB1','CTNNA1','CTGF','VCAN','COL8A1','COL6A2','COL6A1','COL5A1','COL4A2','COL1A1','COL16A1','COL15A1','COL14A1','COL12A1','COL11A1','CNTN1','ADAMTS8','ADAMTS1','COL7A1','COL12A1','CDH1','ECM1','HAS1','ITGA3','GAPDH','ACTB','B2M','RPL13A','HPRT1','RN18S1')
+# Mouse ortholog name conversion
+qg.genes <- plyr::mapvalues(
+  x = qg.genes, 
+  from = c('HPRT1', 'MMP1'),
+  to = c('HPRT', 'MMP1B')
+)
+qg.genes <- unique(tools::toTitleCase(text = tolower(qg.genes)))
+qg.genes.missing <- qg.genes[!qg.genes %in% rownames(sc)]
+qg.genes <- qg.genes[qg.genes %in% rownames(sc)]
+```
+
+### KEGG pathway: axon guidance
+
+```{r kegg-genes}
+kegg.guidance.entry <- keggGet(dbentries = 'mmu04360')
+kegg.guidance.genes <- kegg.guidance.entry[[1]]$GENE[seq(0,length(kegg.guidance.entry[[1]]$GENE),2)]
+kegg.guidance.genes <- gsub("\\;.*","", kegg.guidance.genes)
+kegg.guidance.genes.missing <- kegg.guidance.genes[!kegg.guidance.genes %in% rownames(sc)]
+kegg.guidance.genes <- kegg.guidance.genes[kegg.guidance.genes %in% rownames(sc)]
+```
+
+### Cadherins/Protocadherins
+
+```{r}
+cadherins <- c("CDH1", "CDH2", "CDH12", "CDH3", "DSG1", "DSG2", "DSG3", "DSG4", "DSC1", "DSC2", "DSC3", "PCDH1", "PCDH7", "PCDH8", "PCDH9", "PCDH10", "PCDH11X,", "PCDH11Y", "PCDH12", "PCDH15", "PCDH17", "PCDH18", "PCDH19", "PCDH20", "PCDHA1", "PCDHA2", "PCDHA3", "PCDHA4", "PCDHA5", "PCDHA6", "PCDHA7", "PCDHA8", "PCDHA9", "PCDHA10", "PCDHA11", "PCDHA12", "PCDHA13", "PCDHAC1", "PCDHAC2", "PCDHB1", "PCDHB2", "PCDHB3", "PCDHB4", "PCDHB5", "PCDHB6", "PCDHB7", "PCDHB8", "PCDHB9", "PCDHB10", "PCDHB11", "PCDHB12", "PCDHB13", "PCDHB14", "PCDHB15", "PCDHB16", "PCDHB17", "PCDHB18", "PCDHGA1", "PCDHGA2", "PCDHGA3", "PCDHGA4", "PCDHGA5", "PCDHGA6", "PCDHGA7", "PCDHGA8", "PCDHGA9", "PCDHGA10", "PCDHGA11", "PCDHGA12", "PCDHGB1", "PCDHGB2", "PCDHGB3", "PCDHGB4", "PCDHGB5", "PCDHGB6", "PCDHGB7", "PCDHGC3", "PCDHGC4", "PCDHGC5", "FAT", "FAT2", "FAT4", "CDH4", "CDH5", "CDH6", "CDH7", "CDH8", "CDH9", "CDH10", "CDH11", "CDH13", "CDH15", "CDH16", "CDH17", "CDH18", "CDH19", "CDH20", "CDH23", "CDH22", "CDH24", "CDH26", "CDH28", "CELSR1", "CELSR2", "CELSR3", "CLSTN1", "CLSTN2", "CLSTN3", "DCHS1", "DCHS2", "LOC389118", "PCLKC", "RESDA1", "RET")
+cadherins <- tools::toTitleCase(tolower(cadherins))
+cadherins <- cadherins[which(cadherins %in% rownames(sc[['RNA']]@counts))]
+cadherin.avg.pct <- sparseMatrixStats::rowMeans2(sc[['RNA']]@counts[cadherins,] > 1)
+cadherins.detected <- cadherins[which(cadherin.avg.pct > 0.001)]
+```
+
+## Plotting expression: QG013 gene set
+
+### Dot plot expression across all cell-types
+
+```{r qg0130-dot-plot, fig.height=13, fig.width=8}
+Idents(sc) <- 'celltype'
+DefaultAssay(sc) <- 'RNA'
+tmp <- DotPlot(sc, assay = 'RNA', features = qg.genes, split.by = 'time', cols = rep('red',4))
+plot.data <- tmp$data
+plot.data$celltype <- sapply(strsplit(as.character(plot.data$id), '_'), `[`, 1)
+plot.data$celltype = factor(x = plot.data$celltype, levels = levels(sc$celltype))
+plot.data$time <- sapply(strsplit(as.character(plot.data$id), '_'), `[`, 2)
+plot.data$time = factor(plot.data$time, levels = levels(sc$time))
+plot.data = plot.data %>% 
+  group_by(features.plot) %>% 
+  mutate(avg.exp = scale(avg.exp)) %>%
+  ungroup()
+cutoffs = quantile(plot.data$avg.exp, c(0.025, 0.975), na.rm = TRUE)
+plot.data = plot.data %>% 
+  mutate(avg.exp = case_when(
+    avg.exp < cutoffs[1] ~ cutoffs[1],
+    avg.exp > cutoffs[2] ~ cutoffs[2],
+    TRUE ~ avg.exp
+  ))
+p1 <- plot.data %>% 
+  ggplot() + 
+  geom_point(mapping = aes(x = time, 
+                           y = features.plot,
+                           size = pct.exp,
+                           fill = avg.exp),
+             pch = 21) + 
+  facet_grid(. ~ str_wrap_factor(celltype, width = 10)) +
+  scale_size(name = 'Percent\nexpression',
+               range = c(0, 8)) +
+  scale_fill_gradient2(
+    low = 'blue2', 
+    high = 'red2', 
+    name = 'Average\nscaled\nexpression'
+  ) +  theme_bw() +
+  theme(axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 16, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 14),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        strip.text = element_text(size = 14)) +
+  guides(fill = guide_colorbar(frame.colour = 'black', 
+                               ticks.colour = 'black'),
+         size = guide_legend(override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'QG013-guidance-molecules_dotplot.tiff'), plot = p1, height = 18, width = 15.5, device = 'tiff')
+p1
+```
+
+The QG013 dot plot some cell-type specificity of certain molecules:
+
+
+* Tnc is expressed mostly by astrocytes and its expression decreases over time.
+* Among the MMPs, MMP15 and MMP16 are highest expressed by Oligo lineage cells with decreases over time.
+* Among the integrins, Itga6, Itga7, and Itgb5 show astrocyte specificity. Itga6 increases in astrocytes over time.
+* Laminins show specificity: 
+    + Lama1 is restricted to fibroblasts/pericytes.
+    + Lama2 expressed by astrocytes and fibroblasts/pericytes with increasing trend over time. Interesting that mature Oligos express during/after myelination.
+    + Lamb1 expression in fibroblasts/pericytes decreases over time.
+* Many of the collagens are specific to fibroblasts/pericytes and show trend to decrease over time.
+* Fibronectin and vitronectin show similar pattern to collagens but with more convincing decreases over time.
+
+
+```{r}
+# dat <- FetchData(sc, vars = c(qg.genes, 'celltype', 'time'), slot = 'data') %>% 
+#   mutate(across(.cols = where(is.numeric), .fns = scale))
+# dat_celltype <- dat$celltype
+# dat_time <- dat$time
+# is_numeric <- function(x) return(all(!is.na(x) & is.numeric(x)))
+# dat <- dat %>% select(where(is_numeric)) %>% as.matrix()
+# Heatmap(
+#   matrix = dat,
+#   clustering_method_rows = 'ward.D2',
+#   clustering_method_columns = 'ward.D2',
+#   show_row_names = FALSE,
+#   show_column_names = TRUE,
+# )
+```
+
+Heatmap approach to identifying QG-gene expression patterns gives inconclusive result/visualization (above).
+
+### UMAP expression across time-points
+
+```{r tnc-umap, collapse=TRUE, fig.height=2.5, fig.width=10, fig.cap='Tnc expression'}
+genes <- c('Tnc')
+p.tnc <- FetchData(sc, c('time', genes, 'UMAP_1','UMAP_2')) %>% 
+  reshape2::melt(id.vars = c('UMAP_1','UMAP_2','time')) %>% 
+  arrange(value) %>% 
+  ggplot() +
+  geom_point(aes(x = UMAP_1, y = UMAP_2, color = value), size = 0.1) +
+  facet_grid(variable ~ time) +
+  scale_color_gradientn(colors = my_feat_cols) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.text = element_text(size = 12)) +
+  guides(color = guide_colorbar(frame.colour = 'black', ticks.colour = 'black', title = 'Scaled\nexpression'))
+ggsave(filename = paste0(results_out, 'umap-tnc.tiff'), plot = p.tnc, height = 2.65, width = 10, device = 'tiff', dpi = 320)
+p.tnc
+```
+
+```{r mmp-umap, collapse=TRUE, fig.height=5, fig.width=10, fig.cap='MMP expression'}
+genes <- c('Mmp15','Mmp16')
+p.mmp <- FetchData(sc, c('time', genes, 'UMAP_1','UMAP_2')) %>% 
+  reshape2::melt(id.vars = c('UMAP_1','UMAP_2','time')) %>% 
+  arrange(value) %>% 
+  ggplot() +
+  geom_point(aes(x = UMAP_1, y = UMAP_2, color = value), size = 0.1) +
+  facet_grid(variable ~ time) +
+  scale_color_gradientn(colors = my_feat_cols) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.text = element_text(size = 12)) +
+  guides(color = guide_colorbar(frame.colour = 'black', ticks.colour = 'black', title = 'Scaled\nexpression'))
+ggsave(filename = paste0(results_out, 'umap-mmp.tiff'), plot = p.mmp, height = 4.85, width = 10, device = 'tiff', dpi = 320)
+p.mmp
+```
+
+```{r integrin-umap, collapse=TRUE, fig.height=7.5, fig.width=10, fig.cap='Integrin expression'}
+genes <- c('Itga6', 'Itga7', 'Itgb5')
+p.integrin <- FetchData(sc, c('time', genes, 'UMAP_1','UMAP_2')) %>% 
+  reshape2::melt(id.vars = c('UMAP_1','UMAP_2','time')) %>% 
+  arrange(value) %>% 
+  ggplot() +
+  geom_point(aes(x = UMAP_1, y = UMAP_2, color = value), size = 0.1) +
+  facet_grid(variable ~ time) +
+  scale_color_gradientn(colors = my_feat_cols) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.text = element_text(size = 12)) +
+  guides(color = guide_colorbar(frame.colour = 'black', ticks.colour = 'black', title = 'Scaled\nexpression'))
+ggsave(filename = paste0(results_out, 'umap-integrin.tiff'), plot = p.integrin, height = 7, width = 10, device = 'tiff', dpi = 320)
+p.integrin
+```
+
+```{r laminin-umap, collapse=TRUE, fig.height=7.5, fig.width=10, fig.cap='Laminin expression'}
+genes <- c('Lama1','Lama2','Lamb1')
+p.laminin <- FetchData(sc, c('time', genes, 'UMAP_1','UMAP_2')) %>% 
+  reshape2::melt(id.vars = c('UMAP_1','UMAP_2','time')) %>% 
+  arrange(value) %>% 
+  ggplot() +
+  geom_point(aes(x = UMAP_1, y = UMAP_2, color = value), size = 0.1) +
+  facet_grid(variable ~ time) +
+  scale_color_gradientn(colors = my_feat_cols) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.text = element_text(size = 12)) +
+  guides(color = guide_colorbar(frame.colour = 'black', ticks.colour = 'black', title = 'Scaled\nexpression'))
+ggsave(filename = paste0(results_out, 'umap-laminin.tiff'), plot = p.laminin, height = 7, width = 10, device = 'tiff', dpi = 320)
+p.laminin
+```
+
+```{r ecm-umap, collapse=TRUE, fig.height=7.5, fig.width=10, fig.cap='Other EMC molecule expression'}
+genes <- c('Col1a1','Vtn','Fn1')
+p.ecm <- FetchData(sc, c('time', genes, 'UMAP_1','UMAP_2')) %>% 
+  reshape2::melt(id.vars = c('UMAP_1','UMAP_2','time')) %>% 
+  arrange(value) %>% 
+  ggplot() +
+  geom_point(aes(x = UMAP_1, y = UMAP_2, color = value), size = 0.1) +
+  facet_grid(variable ~ time) +
+  scale_color_gradientn(colors = my_feat_cols) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.text = element_text(size = 12)) +
+  guides(color = guide_colorbar(frame.colour = 'black', ticks.colour = 'black', title = 'Scaled\nexpression'))
+ggsave(filename = paste0(results_out, 'umap-ecm.tiff'), plot = p.ecm, height = 7, width = 10, device = 'tiff', dpi = 320)
+p.ecm
+```
+
+
+## Plotting expression: KEGG pathway: axon guidance
+
+### Dot plot expression across all cell-types
+
+```{r kegg-dot-plot, fig.height=24, fig.width=8}
+DefaultAssay(sc) <- 'RNA'
+tmp <- DotPlot(sc, assay = 'RNA', features = sort(kegg.guidance.genes, decreasing = TRUE), split.by = 'time', cols = rep('red',4))
+plot.data = tmp$data
+plot.data$celltype <- sapply(strsplit(as.character(plot.data$id), '_'), `[`, 1)
+plot.data$celltype = factor(x = plot.data$celltype, levels = levels(sc$celltype))
+plot.data$time <- sapply(strsplit(as.character(plot.data$id), '_'), `[`, 2)
+plot.data$time = factor(plot.data$time, levels = levels(sc$time))
+plot.data = plot.data %>% 
+  group_by(features.plot) %>% 
+  mutate(avg.exp = scale(avg.exp)) %>%
+  ungroup()
+cutoffs = quantile(plot.data$avg.exp, c(0.025, 0.975), na.rm = TRUE)
+plot.data = plot.data %>% 
+  mutate(avg.exp = case_when(
+    avg.exp < cutoffs[1] ~ cutoffs[1],
+    avg.exp > cutoffs[2] ~ cutoffs[2],
+    TRUE ~ avg.exp
+  ))
+p2 <- plot.data %>% 
+  ggplot() + 
+  geom_point(mapping = aes(x = time, 
+                           y = features.plot,
+                           size = pct.exp,
+                           fill = avg.exp),
+             pch = 21) + 
+  facet_grid(. ~ str_wrap_factor(celltype, width = 10)) +
+  scale_size(name = 'Percent\nexpression',
+               range = c(0, 8)) +
+  scale_fill_gradient2(
+    low = 'blue2', 
+    high = 'red2', 
+    name = 'Average\nscaled\nexpression'
+  ) +  theme_bw() +
+  theme(axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 16, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 14),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        strip.text = element_text(size = 14)) +
+  guides(fill = guide_colorbar(frame.colour = 'black', 
+                               ticks.colour = 'black'),
+         size = guide_legend(override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'KEGG-guidance-molecules_dotplot.tiff'), plot = p2, height = 34, width = 16, device = 'tiff')
+p2
+```
+
+
+### Topographic mapping associated genes
+
+```{r kegg-genes}
+kegg.guidance.entry <- keggGet(dbentries = 'mmu04360')
+kegg.guidance.genes <- kegg.guidance.entry[[1]]$GENE[seq(0,length(kegg.guidance.entry[[1]]$GENE),2)]
+kegg.guidance.genes <- gsub("\\;.*","", kegg.guidance.genes)
+kegg.guidance.genes.missing <- kegg.guidance.genes[!kegg.guidance.genes %in% rownames(sc)]
+kegg.guidance.genes <- kegg.guidance.genes[kegg.guidance.genes %in% rownames(sc)]
+ephrin.genes = sort(grep(pattern = 'Eph|Efn', x = kegg.guidance.genes, value = TRUE), decreasing = TRUE)
+sema.plxn.genes = sort(grep(pattern = 'Sema|Plxn', x = kegg.guidance.genes, value = TRUE), decreasing = TRUE)
+slit.robo.genes = sort(grep(pattern = 'Robo|Slit', x = kegg.guidance.genes, value = TRUE), decreasing = TRUE)
+topo.genes = data.frame(
+  gene = c(ephrin.genes, sema.plxn.genes, slit.robo.genes),
+  family = c(rep('Eph Receptor - Ephrin', length(ephrin.genes)),
+             rep('Semaphorin - Plexin', length(sema.plxn.genes)),
+             rep('Slit - Robo', length(slit.robo.genes)))
+)
+```
+
+#### Dot plot by molecule class (all celltypes)
+
+```{r}
+Idents(sc) = 'celltype'
+tmp <- DotPlot(sc, assay = 'RNA', features = topo.genes$gene, split.by = 'time', cols = rep('red',4))
+plot.data <- tmp$data
+plot.data$celltype <- sapply(strsplit(as.character(plot.data$id), '_'), `[`, 1)
+plot.data$celltype = factor(x = plot.data$celltype, levels = levels(sc$celltype))
+plot.data$celltype = plyr::mapvalues(
+  x = plot.data$celltype,
+  from = 'Vascular Leptomeningeal Cell',
+  to = 'Vascular Lepto-meningeal Cell'
+)
+plot.data$time <- sapply(strsplit(as.character(plot.data$id), '_'), `[`, 2)
+plot.data$time = factor(plot.data$time, levels = levels(sc$time))
+plot.data = plot.data %>% 
+  group_by(features.plot) %>% 
+  mutate(avg.exp = scale(avg.exp)) %>%
+  ungroup() %>% 
+  mutate(Family = plyr::mapvalues(
+    x = features.plot,
+    from = topo.genes$gene,
+    to = topo.genes$family
+  ))
+cutoffs = quantile(plot.data$avg.exp, c(0.025, 0.975), na.rm = TRUE)
+plot.data = plot.data %>% 
+  mutate(avg.exp = case_when(
+    avg.exp < cutoffs[1] ~ cutoffs[1],
+    avg.exp > cutoffs[2] ~ cutoffs[2],
+    TRUE ~ avg.exp
+  ))
+p3 <- plot.data %>% 
+  ggplot() + 
+  geom_point(mapping = aes(x = time, 
+                           y = features.plot,
+                           size = pct.exp,
+                           fill = avg.exp),
+             pch = 21) + 
+  facet_grid(Family ~ str_wrap_factor(celltype, width = 10),
+             scales = 'free_y',
+             space = 'free_y') +
+  scale_size(name = 'Percent\nexpression',
+               range = c(0, 8)) +
+  scale_fill_gradient2(
+    low = 'blue2', 
+    high = 'red2', 
+    name = 'Average\nscaled\nexpression'
+  ) +  theme_bw() +
+  theme(axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 16, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        strip.text.x = element_text(size = 18),
+        strip.text.y = element_text(size = 20),
+        legend.position = 'bottom') +
+  guides(fill = guide_colorbar(frame.colour = 'black', 
+                               ticks.colour = 'black'),
+         size = guide_legend(override.aes = list(fill = 'black')))
+ggsave(filename = paste0(results_out, 'topographic-mapping-molecules_dotplot.tiff'), plot = p3, height = 16.5, width = 13, device = 'tiff')
+p3
+```
+
+
+#### Dot plot by molecule class (neuron subtypes)
+
+```{r}
+Idents(neuron) = 'subtype'
+# detected.topo.genes = sparseMatrixStats::rowSums2(
+#   x = neuron@assays$RNA@counts[topo.genes$gene,] > 0
+# ) > 50 # because smallest neuron subtype has 111 cells, so we set about half
+# detected.topo.genes = topo.genes$gene[detected.topo.genes]
+tmp <- DotPlot(neuron, assay = 'RNA', features = topo.genes$gene)
+plot.data <- tmp$data
+plot.data = plot.data %>% 
+  mutate(Family = plyr::mapvalues(
+    x = features.plot,
+    from = topo.genes$gene,
+    to = topo.genes$family
+  ))
+cutoffs = quantile(plot.data$avg.exp.scaled, c(0.025, 0.975), na.rm = TRUE)
+plot.data = plot.data %>% 
+  mutate(avg.exp.scaled = case_when(
+    avg.exp.scaled < cutoffs[1] ~ cutoffs[1],
+    avg.exp.scaled > cutoffs[2] ~ cutoffs[2],
+    TRUE ~ avg.exp.scaled
+  ))
+p3 <- plot.data %>% 
+  ggplot() + 
+  geom_point(
+    mapping = aes(x = id, y = features.plot, size = pct.exp, fill = avg.exp.scaled),
+    pch = 21
+  ) + 
+  facet_grid(Family ~ ., space = 'free_y', drop = TRUE, scales = 'free_y') +
+  scale_size(name = 'Percent\nexpression') +
+  scale_fill_gradient2(
+    low = 'blue2', 
+    high = 'red2', 
+    name = 'Average\nscaled\nexpression'
+  ) + 
+  theme_bw() +
+  theme(axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
+        axis.text.y = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        strip.text.x = element_text(size = 14),
+        strip.text.y = element_text(size = 14),
+        legend.position = 'bottom') +
+  guides(fill = guide_colorbar(frame.colour = 'black', 
+                               ticks.colour = 'black'),
+         size = guide_legend(override.aes = list(fill = 'black')))
+p3
+# ggsave(filename = paste0(results_out, 'topographic-mapping-molecules_dotplot.tiff'), plot = p3, height = 16.5, width = 13, device = 'tiff')
+
+```
+
+### Guidance molecule expression at subtype-level
+
+```{r}
+sc$subtype <- colnames(sc)
+sc$subtype <- plyr::mapvalues(
+  x = sc$subtype,
+  from = colnames(neuron),
+  to = paste(neuron$celltype_adjusted, neuron$subtype, sep = '_'),
+  warn_missing = FALSE
+)
+sc$subtype[!colnames(sc) %in% colnames(neuron)] <- plyr::mapvalues(
+  x = sc$subtype[!colnames(sc) %in% colnames(neuron)],
+  from = colnames(sc)[!colnames(sc) %in% colnames(neuron)],
+  to = as.character(sc$celltype[!colnames(sc) %in% colnames(neuron)]),
+  warn_missing = FALSE
+)
+```
+
+#### Heatmap across celltypes
+
+```{r all-cells-subtype-heatmap}
+Idents(sc) <- 'subtype'
+tmp <- DotPlot(sc, features = kegg.guidance.genes, assay = 'RNA')
+plot.data <- tmp$data
+tmp <- plot.data %>% 
+  filter(!is.na(avg.exp.scaled)) %>% 
+  reshape2::acast(formula = id ~ features.plot, value.var = 'avg.exp.scaled')
+subtype.hclust <- hclust(d = dist(x = tmp), method = 'ward.D2')
+gene.hclust <- hclust(d = dist(x = t(tmp)), method = 'ward.D2')
+
+tiff(filename = paste0(results_out, 'kegg-guidance-molecules_subtype-heatmap.tiff'), height = 6, width = 12, res = 440, units = 'in')
+draw(ComplexHeatmap::Heatmap(
+  matrix = tmp,
+  cluster_rows = dendsort::dendsort(subtype.hclust),
+  cluster_columns = dendsort::dendsort(gene.hclust),
+  # show_row_names = FALSE,
+  # show_column_names = TRUE,
+  show_column_names = FALSE
+))
+dev.off()
+
+tiff(filename = paste0(results_out, 'kegg-guidance-molecules_subtype-heatmap_labeled.tiff'), height = 7.5, width = 26, res = 320, units = 'in')
+draw(ComplexHeatmap::Heatmap(
+  matrix = tmp,
+  cluster_rows = dendsort::dendsort(subtype.hclust),
+  cluster_columns = dendsort::dendsort(gene.hclust),
+  # show_row_names = FALSE,
+  show_column_names = TRUE,
+  # show_column_names = FALSE
+))
+dev.off()
+```
+
+```{r}
+# DefaultAssay(sc) <- 'RNA'
+# dat <- FetchData(
+#   object = sc, 
+#   vars = c(kegg.guidance.genes, 'celltype', 'time'),
+#   slot = 'data'
+# ) %>%
+#   mutate(across(.cols = where(is.numeric), .fns = scale))
+# dat_celltype <- dat$celltype
+# dat_time <- dat$time
+# is_numeric <- function(x) return(all(!is.na(x) & is.numeric(x)))
+# dat <- dat %>% select(where(is_numeric)) %>% as.matrix()
+# Heatmap(
+#   matrix = dat,
+#   clustering_method_rows = 'ward.D2',
+#   clustering_method_columns = 'ward.D2',
+#   show_row_names = FALSE,
+#   show_column_names = TRUE,
+# )
+```
+
+Heatmap with KEGG guidance genes shows clustering of guidance molecule expression non-neuronal cells.
+
+#### Heatmap across neuron subtypes
+
+```{r neurons-subtype-heatmap}
+neuron$subtype.2 <- paste(neuron$celltype_adjusted, neuron$subtype, sep = '_')
+Idents(neuron) <- 'subtype.2'
+plot.data <- DotPlot(neuron, features = kegg.guidance.genes, assay = 'RNA')
+plot.data <- plot.data$data
+tmp <- plot.data %>% 
+  filter(!is.na(avg.exp.scaled)) %>% 
+  reshape2::acast(formula = id ~ features.plot, value.var = 'avg.exp.scaled')
+subtype.hclust <- hclust(d = dist(x = tmp), method = 'ward.D2')
+gene.hclust <- hclust(d = dist(x = t(tmp)), method = 'ward.D2')
+
+tiff(filename = paste0(results_out, 'kegg-guidance-molecules_neurons-subtype-heatmap.tiff'), height = 5.5, width = 9, res = 320, units = 'in')
+draw(ComplexHeatmap::Heatmap(
+  matrix = tmp,
+  cluster_rows = dendsort::dendsort(subtype.hclust),
+  cluster_columns = dendsort::dendsort(gene.hclust),
+  # show_row_names = FALSE,
+  show_column_names = FALSE,
+  heatmap_legend_param = list(
+    title = 'Scaled expression'
+  )
+))
+dev.off()
+
+{
+  tiff(filename = paste0(results_out, 'kegg-guidance-molecules_neurons-subtype-heatmap_labeled.tiff'), height = 6.5, width = 28, res = 320, units = 'in')
+  draw(ComplexHeatmap::Heatmap(
+    matrix = tmp,
+    cluster_rows = dendsort::dendsort(subtype.hclust),
+    cluster_columns = dendsort::dendsort(gene.hclust),
+    # column_names_rot = 65,
+    # show_row_names = FALSE,
+    show_column_names = TRUE,
+    heatmap_legend_param = list(
+      title = 'Scaled expression'
+    )
+  ))
+  dev.off()
+}
+```
+
+Heatmap of KEGG guidance genes in neuronal subtypes show no distinct clusters of patterns of expression.
+
+
+## Clustering all cells on guidance molecule expression
+
+```{r}
+DefaultAssay(sc) <- 'RNA'
+guidance.genes <- unique(c(qg.genes, kegg.guidance.genes, cadherins.detected))
+axon_guidance <- SplitObject(sc, split.by = 'orig.ident')
+axon_guidance <- lapply(
+  X = axon_guidance,
+  FUN = NormalizeData
+)
+axon_guidance <- FindIntegrationAnchors(
+  object.list = axon_guidance,
+  anchor.features = guidance.genes
+)
+axon_guidance <- IntegrateData(
+  anchorset = axon_guidance,
+  features = guidance.genes
+)
+DefaultAssay(axon_guidance) <- 'integrated'
+axon_guidance <- axon_guidance %>% 
+  ScaleData() %>% 
+  RunPCA()
+ElbowPlot(axon_guidance, ndims = 40)
+axon_guidance <- axon_guidance %>% 
+  FindNeighbors(dims = 1:10) %>% 
+  RunUMAP(dims = 1:10) %>% 
+  FindClusters(resolution = 0.1)
+axon_guidance$celltype = factor(axon_guidance$celltype, levels = levels(sc$celltype))
+axon_guidance$time = factor(axon_guidance$time, levels = levels(sc$time))
+```
+
+### Multi-Dimensional Scaling (MDS)
+
+```{r}
+DefaultAssay(axon_guidance) <- 'RNA'
+meta_vars <- c('celltype','time')
+dat <- FetchData(
+  object = axon_guidance,
+  vars =  c(meta_vars, guidance.genes)
+)
+dat <- dat %>% 
+  group_by(across(all_of(meta_vars))) %>% 
+  summarise(across(.cols = where(is.numeric), .fns = mean))
+dat_meta <- dat[meta_vars]
+dat_avg <- as.data.frame(dat[!colnames(dat) %in% meta_vars])
+rownames(dat_avg) <- paste(dat_meta$celltype, dat_meta$time, sep = '.')
+dat_dist <- dist(x = dat_avg, method = 'euclidean')
+mds <- as.data.frame(cmdscale(d = dat_dist, k = 7))
+colnames(mds) <- paste('MDS', 1:7, sep = '_')
+mds_dat <- cbind(mds, dat_meta)
+mds.celltype = mds_dat %>% 
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = MDS_1, y = MDS_2)) +
+  geom_point(mapping = aes(fill = celltype), 
+             color = 'black', pch = 21, size = 3) + 
+  scale_fill_manual(values = celltype.cols) + 
+  labs(title = 'MDS colored by celltype') +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        legend.title = element_blank(),
+        plot.title = element_text(size = 14),
+        legend.text = element_text(size = 12),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA)) +
+  guides(fill = guide_legend(override.aes = list(size = 5))) +
+  coord_fixed()
+mds.time = mds_dat %>% 
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = MDS_1, y = MDS_2)) +
+  geom_point(mapping = aes(fill = time), 
+             color = 'black', pch = 21, size = 3) + 
+  labs(title = 'MDS colored by time-points') +
+  scale_fill_manual(values = time.cols) + 
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        plot.title = element_text(size = 14),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA)) +
+  guides(fill = guide_legend(override.aes = list(size = 5))) +
+  coord_fixed()
+mds = mds.celltype | mds.time
+ggsave(filename = paste0(results_out, 'axon-guidance-mds-plot.tiff'), plot = mds, device = 'tiff', height = 3.75, width = 10, dpi = 320)
+```
+
+### PCA
+
+```{r}
+pca.axes <- ggplot(data.frame(x=10,y=10),aes(x=x,y,y)) +
+  geom_point() +
+  xlim(c(0,1)) + ylim(c(0,1)) +
+  theme_classic() +
+  xlab('PC 1') + ylab('PC 2') +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_text(size = 10),
+        axis.line = element_line(
+          color = 'black',
+          arrow = arrow(angle = 15, length = unit(.35, 'cm'), type = 'closed')
+        ),
+        panel.background = element_rect(fill = 'transparent', color = NA),
+        panel.border = element_rect(fill = 'transparent', color = NA),
+  )
+layout <- c(
+  patchwork::area(t = 11, l = 1, b = 11, r = 1),
+  patchwork::area(t = 1, l = 1, b = 11, r = 11)
+)
+pca.celltype <- DimPlot(axon_guidance, reduction = 'pca', group.by = 'celltype', shuffle = TRUE, label = TRUE, repel = TRUE, label.size = 4) +
+  scale_color_manual(values = celltype.cols) +
+  labs(title = 'PCA colored by celltype') +
+  theme_void() +
+  theme(legend.text = element_text(size = 12),
+        plot.title = element_text(size = 18))
+pca.celltype = pca.axes + pca.celltype + plot_layout(design = layout)
+pca.time <- DimPlot(axon_guidance, reduction = 'pca', group.by = 'time', shuffle = TRUE) +
+  labs(title = 'PCA colored by time-point') +
+  scale_color_manual(values = time.cols) +
+  theme_void() +
+  theme(legend.text = element_text(size = 12),
+        plot.title = element_text(size = 18))
+pca.time = pca.axes + pca.time + plot_layout(design = layout)
+pca.axon = pca.celltype | pca.time
+ggsave(filename = paste0(results_out, 'axon-guidance-pca-plot.tiff'), plot = pca.axon, device = 'tiff', height = 4.5, width = 11, dpi = 320)
+```
+
+### Summary
+
+```{r}
+pca.celltype <- DimPlot(axon_guidance, reduction = 'pca', group.by = 'celltype', shuffle = TRUE, label = TRUE, repel = TRUE, label.size = 4, pt.size = 1) +
+  scale_color_manual(values = celltype.cols) +
+  labs(title = 'PCA colored by celltype') +
+  theme(legend.text = element_text(size = 12),
+        plot.title = element_text(size = 16, hjust = 0, face = 'plain'),
+        legend.position = 'none',
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank()) +
+  coord_fixed()
+mds.celltype = mds_dat %>% 
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = MDS_1, y = MDS_2)) +
+  geom_point(mapping = aes(fill = celltype), 
+             color = 'black', pch = 21, size = 3.5) + 
+  scale_fill_manual(values = celltype.cols) + 
+  labs(title = 'MDS colored by celltype') +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        legend.title = element_blank(),
+        plot.title = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank()) +
+  guides(fill = guide_legend(override.aes = list(size = 5))) +
+  coord_fixed()
+mds.timepoint = mds_dat %>% 
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = MDS_1, y = MDS_2)) +
+  geom_point(mapping = aes(fill = time), 
+             color = 'black', pch = 21, size = 3.5) + 
+  scale_fill_manual(values = time.cols) + 
+  labs(title = 'MDS colored by time-point') +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        legend.title = element_blank(),
+        plot.title = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank()) +
+  guides(fill = guide_legend(override.aes = list(size = 5))) +
+  coord_fixed()
+dimreduc.plot = pca.celltype | mds.celltype
+ggsave(filename = paste0(results_out, 'axon-guidance-all-cells-dim-reduction-summary.tiff'), plot = dimreduc.plot, device = 'tiff', height = 4.5, width = 11, dpi = 320)
+```
+
+Dim reduction and clustering of all neurons using only guidance molecule genes shows some smaller clusters of distinct subsets, and some overlapping/distinct regions of neuronal ex/inh types but with no relation to timepoint.
+
+## Clustering neurons on guidance molecule expression
+
+```{r}
+DefaultAssay(neuron) <- 'RNA'
+guidance.genes <- unique(c(qg.genes, kegg.guidance.genes, cadherins.detected))
+axon_guidance <- SplitObject(neuron, split.by = 'orig.ident')
+axon_guidance <- lapply(
+  X = axon_guidance,
+  FUN = NormalizeData
+)
+axon_guidance <- FindIntegrationAnchors(
+  object.list = axon_guidance,
+  anchor.features = guidance.genes
+)
+axon_guidance <- IntegrateData(
+  anchorset = axon_guidance,
+  features = guidance.genes
+)
+DefaultAssay(axon_guidance) <- 'integrated'
+axon_guidance <- axon_guidance %>% 
+  ScaleData() %>% 
+  RunPCA()
+ElbowPlot(axon_guidance, ndims = 40)
+axon_guidance <- axon_guidance %>% 
+  FindNeighbors(dims = 1:10) %>% 
+  RunUMAP(dims = 1:10) %>% 
+  FindClusters(resolution = 0.1)
+axon_guidance$subtype = factor(axon_guidance$subtype, levels = levels(neuron$subtype))
+axon_guidance$time = factor(axon_guidance$time, levels = levels(neuron$time))
+```
+
+### Multi-Dimensional Scaling (MDS)
+
+```{r}
+DefaultAssay(axon_guidance) <- 'RNA'
+meta_vars <- c('subtype')
+dat <- FetchData(
+  object = axon_guidance,
+  vars =  c(meta_vars, guidance.genes)
+)
+dat <- dat %>% 
+  group_by(across(all_of(meta_vars))) %>% 
+  summarise(across(.cols = where(is.numeric), .fns = mean))
+dat_meta <- dat[meta_vars]
+dat_avg <- as.data.frame(dat[!colnames(dat) %in% meta_vars])
+rownames(dat_avg) <- dat_meta$subtype
+dat_dist <- dist(x = dat_avg, method = 'euclidean')
+mds <- as.data.frame(cmdscale(d = dat_dist, k = 7))
+colnames(mds) <- paste('MDS', 1:7, sep = '_')
+mds_dat <- cbind(mds, dat_meta)
+mds.subtype = mds_dat %>% 
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = MDS_1, y = MDS_2)) +
+  geom_point(mapping = aes(fill = subtype), 
+             color = 'black', pch = 21, size = 3) + 
+  scale_fill_manual(values = neuron.cols) + 
+  labs(title = 'MDS colored by subtype') +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        legend.title = element_blank(),
+        plot.title = element_text(size = 14),
+        legend.text = element_text(size = 12),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA)) +
+  guides(fill = guide_legend(override.aes = list(size = 5))) +
+  coord_fixed()
+mds.subtype
+ggsave(filename = paste0(results_out, 'axon-guidance-neuron-subtype-mds-plot.tiff'), plot = mds.subtype, device = 'tiff', height = 3.75, width = 5, dpi = 320)
+```
+
+### PCA
+
+```{r}
+pca.axes <- ggplot(data.frame(x=10,y=10),aes(x=x,y,y)) +
+  geom_point() +
+  xlim(c(0,1)) + ylim(c(0,1)) +
+  theme_classic() +
+  xlab('PC 1') + ylab('PC 2') +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_text(size = 10),
+        axis.line = element_line(
+          color = 'black',
+          arrow = arrow(angle = 15, length = unit(.35, 'cm'), type = 'closed')
+        ),
+        panel.background = element_rect(fill = 'transparent', color = NA),
+        panel.border = element_rect(fill = 'transparent', color = NA),
+  )
+layout <- c(
+  patchwork::area(t = 11, l = 1, b = 11, r = 1),
+  patchwork::area(t = 1, l = 1, b = 11, r = 11)
+)
+pca.subtype <- DimPlot(axon_guidance, reduction = 'pca', group.by = 'subtype', shuffle = TRUE, label = TRUE, repel = TRUE, label.size = 4) +
+  scale_color_manual(values = neuron.cols) +
+  labs(title = 'PCA colored by subtype') +
+  theme_void() +
+  theme(legend.text = element_text(size = 12),
+        plot.title = element_text(size = 18))
+pca.subtype = pca.axes + pca.subtype + plot_layout(design = layout)
+pca.time <- DimPlot(axon_guidance, reduction = 'pca', group.by = 'time', shuffle = TRUE) +
+  labs(title = 'PCA colored by time-point') +
+  scale_color_manual(values = time.cols) +
+  theme_void() +
+  theme(legend.text = element_text(size = 12),
+        plot.title = element_text(size = 18))
+pca.time = pca.axes + pca.time + plot_layout(design = layout)
+pca.axon = pca.subtype | pca.time
+ggsave(filename = paste0(results_out, 'axon-guidance-neuron-subtype-pca-plot.tiff'), plot = pca.axon, device = 'tiff', height = 4.5, width = 11, dpi = 320)
+```
+
+### Summary
+
+```{r}
+pca.subtype <- DimPlot(axon_guidance, reduction = 'pca', group.by = 'subtype', shuffle = TRUE, pt.size = 1) +
+  scale_color_manual(values = neuron.cols) +
+  labs(title = 'PCA colored by subtype') +
+  theme(legend.text = element_text(size = 12),
+        plot.title = element_text(size = 16, hjust = 0, face = 'plain'),
+        legend.position = 'none',
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank()) +
+  coord_fixed()
+mds.subtype = mds_dat %>% 
+  shuffle_rows() %>% 
+  ggplot(mapping = aes(x = MDS_1, y = MDS_2)) +
+  geom_point(mapping = aes(fill = subtype), 
+             color = 'black', pch = 21, size = 3.5) + 
+  scale_fill_manual(values = neuron.cols) + 
+  labs(title = 'MDS colored by subtype') +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        legend.title = element_blank(),
+        plot.title = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        panel.background = element_rect(color = 'black', fill = NA),
+        panel.border = element_rect(color = 'black', fill = NA),
+        panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank()) +
+  guides(fill = guide_legend(override.aes = list(size = 5))) +
+  coord_fixed()
+dimreduc.plot = pca.subtype | mds.subtype
+ggsave(filename = paste0(results_out, 'axon-guidance-neuron-subtype-dim-reduction-summary.tiff'), plot = dimreduc.plot, device = 'tiff', height = 4.5, width = 11, dpi = 320)
+```
+
+
+
+
+
+```{r time-course, eval=FALSE}
+# DefaultAssay(sc) <- 'RNA'
+# tmp <- ScaleData(object = sc, features = union(kegg.guidance.genes, qg.genes))
+# tmp <- FetchData(
+#   object = sc, 
+#   vars = c(union(kegg.guidance.genes, qg.genes), 'time', 'celltype'), 
+#   slot = 'data'
+# ) %>% 
+#   mutate(across(where(is.numeric), scale)) %>%
+#   group_by(celltype, time) %>% 
+#   summarise(across(.cols = everything(), .fns = mean)) %>%
+#   ungroup() %>% 
+#   reshape2::melt(id.vars = c('celltype','time')) %>% 
+#   mutate(obs_id = paste(celltype, variable, sep = '_')) %>% 
+#   select(c('obs_id', 'time', 'value')) %>% 
+#   reshape2::acast(formula = obs_id ~ time)
+# tmp.dist <- dist(x = tmp)
+# tmp.hclust <- hclust(d = tmp.dist, method = 'ward.D2')
+# tmp.cluster <- cutree(tree = tmp.hclust, h = 10)
+# cbind(as.data.frame(tmp), 'cluster' = tmp.cluster) %>% 
+#   tibble::rownames_to_column('obs') %>% 
+#   reshape2::melt(id.vars = c('obs', 'cluster')) %>% 
+#   ggplot(mapping = aes(x = variable, y = value, group = obs, color = cluster)) +
+#   geom_line() +
+#   theme(legend.position = 'none')
+```
+
+## END
+
+```{r}
+sessionInfo()
+```
+
