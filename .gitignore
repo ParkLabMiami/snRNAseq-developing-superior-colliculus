@@ -30,7 +30,8 @@ scripts/*.pdf
 scripts/*.html
 
 # We've moved to Quarto now
-scripts/*.Rmd
+*.Rmd
+*.rmarkdown
 
 # Random files, cache, etc.
 *.tmp
