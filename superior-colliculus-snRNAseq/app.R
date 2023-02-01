@@ -18,7 +18,7 @@ library(shinymanager)
 # load(file = './data/appdata.RData') # This is faster by ~10%
 source(file = 'helper.R')
 
-
+source(file = 'secret-login-info.R')
 
 # Password protection -----------------------------------------------------
 
@@ -45,18 +45,10 @@ t = setTimeout(logout, 300000);  // time is in milliseconds (1000 is 1 second)
 idleTimer();"
 
 
-IDs = c('kpark','jsc228','aca136','fxf201','rxm1687','klevay','mtapia2','ncm110')
-allowed.users = c(paste0(IDs, '@miami.edu'),
-                  paste0(IDs, '@med.miami.edu'))
-password <- 'axonregen'
-
 credentials <- data.frame(
   user = allowed.users,
   password = rep(password, length(allowed.users))
 )
-
-
-
 
 
 # UI ----------------------------------------------------------------------
@@ -617,15 +609,17 @@ server <- function(input, output, session) {
 
 shinyApp(ui = ui, server = server)
 
-# To deploy, run the following two lines:
-# Current working diretory should contain the project directory.
+# # To deploy, run the following two lines:
+# # Current working diretory should contain the project directory.
 # setwd('..')
-# rsconnect::deployApp(appDir = 'superior-colliculus-snRNAseq/', appName = 'superior-colliculus-snRNAseq', account = 'parklabmiami')
-# rsconnect::accounts()
-# rsconnect::accountInfo()
-
-
-# To allow bioconductor packages to be sourced. Run the following in your 
-# current session before pushing.
+# #
+# # To allow bioconductor packages to be sourced. Run the following in your
+# # current session before pushing.
 # library(BiocManager)
 # options(repos = BiocManager::repositories())
+# #
+# # rsconnect::accounts()
+# # rsconnect::accountInfo()
+# rsconnect::deployApp(appDir = 'superior-colliculus-snRNAseq/', appName = 'superior-colliculus-snRNAseq', account = 'parklabmiami')
+
+

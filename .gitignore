@@ -38,3 +38,6 @@ scripts/*.html
 *.tmp
 *_cache
 *_files
+
+# Webportal login info
+superior-colliculus-snRNAseq/secret-login-info.R
