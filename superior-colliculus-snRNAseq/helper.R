@@ -181,7 +181,7 @@ drawSplitFeaturePlot <- function(
           axis.title = element_text(size = 14),
           axis.ticks = element_blank(),
           panel.grid = element_blank(),
-          strip.text = element_text(size = 14),
+          strip.text = element_text(size = 18),
           legend.text = element_text(size = 14),
           legend.title = element_text(size = 14)) + 
     guides(color = guide_colorbar(frame.colour = 'black',
@@ -263,7 +263,7 @@ drawSplitDotPlot <- function(
   feature,
   groupby,
   splitby = 'time',
-  ncol = 4
+  ncol = 2
 ) {
   plot_these <- c(paste0(dataset_value, '_UMAP_1'), groupby, splitby)
   data_df <- metadata[plot_these]
@@ -306,7 +306,8 @@ drawSplitDotPlot <- function(
     ggplot(mapping = aes(x = groupby, y = feature)) +
     geom_point(mapping = aes(size = pct, fill = avg), pch = 21) +
     facet_wrap(. ~ splitby, ncol = ncol) +
-    scale_fill_viridis_c(option = 'A') +
+    # scale_fill_viridis_c(option = 'A') +
+    scale_fill_gradient(low = 'grey90', high = 'blue') +
     scale_size(range = c(0, 6), limits = c(0, 1)) +
     theme_bw() +
     xlab(label = groupby) +
@@ -366,9 +367,9 @@ drawFeatureViolinPlot <- function(
     ylab(label = feature) +
     theme_bw() +
     theme(legend.position = 'none',
-          axis.text.x = element_text(size = 12, angle = 65, hjust = 1),
-          axis.text.y = element_text(size = 12),
-          axis.title.x = element_text(size = 14),
+          axis.text.x = element_text(size = 18, angle = 65, hjust = 1),
+          axis.text.y = element_text(size = 14),
+          axis.title.x = element_text(size = 18),
           axis.title.y = element_text(size = 14))
   return(p)
 }

@@ -6,13 +6,13 @@
 
 # Libraries ---------------------------------------------------------------
 
-library(Seurat)
-library(ggplot2)
-library(plotly)
-library(dplyr)
-library(tibble)
-library(tidyr)
-library(HDF5Array)
+# library(Seurat)
+# library(ggplot2)
+# library(plotly)
+# library(dplyr)
+# library(tibble)
+# library(tidyr)
+# library(HDF5Array)
 
 
 # Directory setup ---------------------------------------------------------

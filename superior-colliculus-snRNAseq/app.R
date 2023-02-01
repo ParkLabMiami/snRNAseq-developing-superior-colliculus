@@ -45,7 +45,9 @@ t = setTimeout(logout, 300000);  // time is in milliseconds (1000 is 1 second)
 idleTimer();"
 
 
-allowed.users <- c('kpark@miami.edu', 'kpark@med.miami.edu', 'jsc228@miami.edu', 'jsc228@med.miami.edu')
+IDs = c('kpark','jsc228','aca136','fxf201','rxm1687','klevay','mtapia2','ncm110')
+allowed.users = c(paste0(IDs, '@miami.edu'),
+                  paste0(IDs, '@med.miami.edu'))
 password <- 'axonregen'
 
 credentials <- data.frame(
@@ -215,7 +217,26 @@ ui <- secure_app(ui = fluidPage(
             value = TRUE
           ),
           HTML(
-            text = "<p style='font-size:14px'><b>How to use:</b><br>To get started, select a dataset from the \"Select dataset\" drop-down menu. <ul style=\"padding-left:10px\"><li>All_SC: all cells from study.</li><li>Neurons: neuronal cells only.</li></p><p>Query genes from the \"Select Gene\" drop-down menu. Alternatively, start typing your gene of interest for matching items.</p><p>Cells can be grouped and colored by celltype, subtype, and time-point of collection from the \"Group cells by\" menu.</p>"
+            text = "
+            <p style='font-size:12px'><b>How to use:</b>
+            <br>
+            To get started, select a dataset from the \"Select dataset\" drop-down menu. Select genes of interest from the \"Select Gene\" drop-down menu. Alternatively, start typing your gene of interest for matching items.
+            </p>
+            <br>
+            <p style='font-size:12px'>
+            <b>Drop-down legend:</b>
+            Cells can be grouped and colored by celltype, subtype, time-point of collection, and other metadata from the \"Group cells by\" menu.
+            <ul style=\"padding-left:10px\">
+            <li><span style='font-family:courier'>SuperiorColliculus</span>: all cells from study</li>
+            <li><span style='font-family:courier'>Neurons</span>: neuronal cells only</li>
+            <li><span style='font-family:courier'>time</span>: development time-point of tissue collection</li>
+            <li><span style='font-family:courier'>celltype</span>: celltype class</li>
+            <li><span style='font-family:courier'>subtype</span>: neuronal subtypes and further glial subtypes not reported in manuscript</li>
+            <li><span style='font-family:courier'>integrated_snn_res.0.8</span>: original SuperiorColliculus cluster output by Seurat</li>
+            <li><span style='font-family:courier'>SingleR_Transseq</span>: SingleR-based prediction of Trans-seq subtypes in SuperiorColliculus dataset</li>
+            <li><span style='font-family:courier'>SingleR_Vectorseq</span>: SingleR-based prediction of Vector-seq subtypes in SuperiorColliculus dataset</li>
+            </ul>
+            </p>"
           )
         ),
         mainPanel(
@@ -252,7 +273,7 @@ ui <- secure_app(ui = fluidPage(
               width = 12,
               plotOutput(
                 outputId = 'featureviolinplot',
-                height = '250px'
+                height = '350px'
               )
             ),
           )
@@ -299,7 +320,26 @@ ui <- secure_app(ui = fluidPage(
             label = 'Submit'
           ),
           HTML(
-            text = "<p style='font-size:14px'><b>How to use:</b><br><ul style=\"padding-left:10px\"><li>All_SC: all cells from study.</li><li>Neurons: neuronal cells only.</li></p>"
+            text = "
+            <p style='font-size:12px'><b>How to use:</b>
+            <br>
+            Type multiple genes of interest into the \"Select Gene\" box. Click \"Submit\" to update dot plots (note: dot plots may reload without clicking \"Submit\" but will not reflect new query list).
+            </p>
+            <br>
+            <p style='font-size:12px'>
+            <b>Drop-down legend:</b>
+            Cells can be grouped and colored by celltype, subtype, time-point of collection, and other metadata from the \"Group cells by\" menu.
+            <ul style=\"padding-left:10px\">
+            <li><span style='font-family:courier'>SuperiorColliculus</span>: all cells from study</li>
+            <li><span style='font-family:courier'>Neurons</span>: neuronal cells only</li>
+            <li><span style='font-family:courier'>time</span>: development time-point of tissue collection</li>
+            <li><span style='font-family:courier'>celltype</span>: celltype class</li>
+            <li><span style='font-family:courier'>subtype</span>: neuronal subtypes and further glial subtypes not reported in manuscript</li>
+            <li><span style='font-family:courier'>integrated_snn_res.0.8</span>: original SuperiorColliculus cluster output by Seurat</li>
+            <li><span style='font-family:courier'>SingleR_Transseq</span>: SingleR-based prediction of Trans-seq subtypes in SuperiorColliculus dataset</li>
+            <li><span style='font-family:courier'>SingleR_Vectorseq</span>: SingleR-based prediction of Vector-seq subtypes in SuperiorColliculus dataset</li>
+            </ul>
+            </p>"
           )
         ),
         mainPanel = mainPanel(
@@ -321,7 +361,7 @@ ui <- secure_app(ui = fluidPage(
               plotOutput(
                 outputId = 'featuresplitdotplot',
                 width = '100%',
-                height = '500px'
+                height = '600px'
               )
             )
           )
@@ -368,7 +408,7 @@ server <- function(input, output, session) {
     session = session,
     inputId = "selected_groupby", 
     label = "Group cells by:",
-    choices = cell_groupings,
+    choices = categoricalVars,
     selected = 'subtype'
   )
   
@@ -396,7 +436,7 @@ server <- function(input, output, session) {
     session = session,
     inputId = "selected_groupby_multiple", 
     label = "Group cells by:",
-    choices = cell_groupings,
+    choices = categoricalVars,
     selected = 'subtype'
   )
   
@@ -426,7 +466,7 @@ server <- function(input, output, session) {
   # Joined featureplot + dimplot
   observeEvent(
     eventExpr = {
-      c(input$selected_dataset, input$selected_groupby, input$selected_feature)
+      c(input$selected_dataset, input$selected_groupby, input$selected_feature, input$draw_labels)
     },
     handlerExpr = {
       tmp_group <- req(input$selected_groupby)
@@ -556,7 +596,7 @@ server <- function(input, output, session) {
       tmp_groupby <- req(input$selected_groupby_multiple)
       tmp_ncol <- switch(
         EXPR = LETTERS[which.max(input$dimension[1] > c(1008, 640, 0))],
-        A = 4,
+        A = 2,
         B = 2,
         C = 1
       )
@@ -580,7 +620,7 @@ shinyApp(ui = ui, server = server)
 # To deploy, run the following two lines:
 # Current working diretory should contain the project directory.
 # setwd('..')
-# rsconnect::deployApp(appDir = 'SuperiorColliculus_snRNAseq_browser/', appName = 'superior-colliculus-snRNAseq', account = 'parklabmiami')
+# rsconnect::deployApp(appDir = 'superior-colliculus-snRNAseq/', appName = 'superior-colliculus-snRNAseq', account = 'parklabmiami')
 # rsconnect::accounts()
 # rsconnect::accountInfo()
 

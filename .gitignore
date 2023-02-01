@@ -15,6 +15,7 @@ notes/*
 *.h5
 *.RData
 *.loom
+data/GEO-submission/*
 
 # Referenced data
 ref/Xie*
